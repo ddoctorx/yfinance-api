@@ -30,10 +30,13 @@ from app.services.data_source_manager import DataSourceManager
 from app.services.sec_service import initialize_sec_service, shutdown_sec_service
 
 # 导入路由
-from app.api.v1.quote import router as quote_router
-from app.api.v1.history import router as history_router
-from app.api.v1.test import router as test_router
-from app.api.v1.sec import router as sec_router
+from app.api.v1 import (
+    quote_router,
+    history_router,
+    test_router,
+    sec_router,
+    sec_advanced_router
+)
 
 # 配置日志
 configure_logging()
@@ -106,39 +109,39 @@ app = FastAPI(
     version=settings.app_version,
     description="""
     ## Finance API
-    
+
     基于 yfinance 和 SEC EDGAR 的金融数据API服务，提供：
-    
+
     * **实时报价** - 获取股票实时价格和基本信息
     * **历史数据** - 获取K线数据、股息、拆股等历史信息
     * **公司信息** - 获取公司基本资料和财务指标
     * **SEC财报数据** - 获取美股公司官方财务报表 (NEW!)
     * **批量查询** - 支持多个股票代码的批量查询
-    
+
     ### 数据来源
     - **股价数据**: Yahoo Finance
     - **财报数据**: SEC EDGAR API + XBRL (官方数据源)
-    
+
     ### 主要功能
     #### SEC财报模块 🆕
-    - 年度和季度财务报表 (10-K, 10-Q)  
+    - 年度和季度财务报表 (10-K, 10-Q)
     - 损益表、资产负债表、现金流量表
     - 季度收入趋势和同比增长分析
     - 年度财务数据对比
     - SEC文件和新闻动态
     - 主要财务比率计算
-    
+
     ### 缓存策略
     - 实时报价：缓存1分钟
     - 历史数据：缓存1小时
     - 公司信息：缓存1天
     - SEC财报数据：缓存1小时
     - SEC新闻：缓存30分钟
-    
+
     ### 限流
     - 每分钟最多100次请求
     - 批量查询最多支持10个股票代码
-    
+
     ### API版本
     - v1: `/v1/` - 当前稳定版本
     - SEC模块: `/v1/sec/` - 财报数据专用接口
@@ -344,29 +347,12 @@ async def get_cache_status():
 
 
 # 注册API路由
-app.include_router(
-    quote_router,
-    prefix=f"{settings.api_v1_prefix}/quote",
-    tags=["报价"]
-)
-
-app.include_router(
-    history_router,
-    prefix=f"{settings.api_v1_prefix}/history",
-    tags=["历史数据"]
-)
-
-app.include_router(
-    test_router,
-    prefix=f"{settings.api_v1_prefix}/test",
-    tags=["测试"]
-)
-
-app.include_router(
-    sec_router,
-    prefix=f"{settings.api_v1_prefix}/sec",
-    tags=["SEC"]
-)
+app.include_router(quote_router, prefix="/api/v1", tags=["股价查询"])
+app.include_router(history_router, prefix="/api/v1", tags=["历史数据"])
+app.include_router(test_router, prefix="/api/v1", tags=["测试"])
+app.include_router(sec_router, prefix="/api/v1", tags=["SEC数据"])
+app.include_router(sec_advanced_router,
+                   prefix="/api/v1/sec-advanced", tags=["SEC高级功能"])
 
 
 # 根路径重定向到文档

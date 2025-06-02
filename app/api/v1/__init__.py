@@ -8,5 +8,12 @@ from .quote import router as quote_router
 from .history import router as history_router
 from .test import router as test_router
 from .sec import router as sec_router
+from .sec_advanced import router as sec_advanced_router
 
-__all__ = ["quote_router", "history_router", "test_router", "sec_router"]
+__all__ = [
+    "quote_router",
+    "history_router",
+    "test_router",
+    "sec_router",
+    "sec_advanced_router"
+]

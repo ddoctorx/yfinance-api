@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     yf_session_timeout: int = Field(
         default=30, env="YF_TIMEOUT", description="yfinance请求超时时间")
     yf_max_retries: int = Field(
-        default=3, env="YF_MAX_RETRIES", description="yfinance最大重试次数")
+        default=5, env="YF_MAX_RETRIES", description="yfinance最大重试次数")
 
     # 日志配置
     log_level: str = Field(default="INFO", env="LOG_LEVEL")

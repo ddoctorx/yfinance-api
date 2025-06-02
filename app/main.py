@@ -347,10 +347,10 @@ async def get_cache_status():
 
 
 # 注册API路由
-app.include_router(quote_router, prefix="/api/v1", tags=["股价查询"])
-app.include_router(history_router, prefix="/api/v1", tags=["历史数据"])
-app.include_router(test_router, prefix="/api/v1", tags=["测试"])
-app.include_router(sec_router, prefix="/api/v1", tags=["SEC数据"])
+app.include_router(quote_router, prefix="/api/v1/quote", tags=["股价查询"])
+app.include_router(history_router, prefix="/api/v1/history", tags=["历史数据"])
+app.include_router(test_router, prefix="/api/v1/test", tags=["测试"])
+app.include_router(sec_router, prefix="/api/v1/sec", tags=["SEC数据"])
 app.include_router(sec_advanced_router,
                    prefix="/api/v1/sec-advanced", tags=["SEC高级功能"])
 

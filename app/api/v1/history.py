@@ -1,6 +1,7 @@
 """
 历史数据API路由
 提供K线数据、股息、拆股等历史信息
+支持多数据源降级机制
 """
 
 from typing import Optional
@@ -9,11 +10,17 @@ from fastapi import APIRouter, Query, Depends
 from app.core.logging import get_logger
 from app.models.base import BaseResponse
 from app.models.history import HistoryData, HistoryParams, ActionsData
-from app.services.yfinance_service import yfinance_service
+from app.services.data_source_manager import DataSourceManager
 from app.utils.exceptions import InvalidParameterError
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+def get_data_source_manager() -> DataSourceManager:
+    """获取数据源管理器实例（本地引用以避免循环导入）"""
+    from app.main import get_data_source_manager
+    return get_data_source_manager()
 
 
 @router.get("/{symbol}", response_model=BaseResponse[dict])
@@ -29,7 +36,8 @@ async def get_history(
         None, description="结束日期 (YYYY-MM-DD)", pattern="^\\d{4}-\\d{2}-\\d{2}$"),
     auto_adjust: bool = Query(True, description="是否自动调整价格"),
     prepost: bool = Query(False, description="是否包含盘前盘后数据"),
-    actions: bool = Query(True, description="是否包含分红和拆股信息")
+    actions: bool = Query(True, description="是否包含分红和拆股信息"),
+    manager: DataSourceManager = Depends(get_data_source_manager)
 ):
     """
     获取股票历史数据
@@ -44,6 +52,7 @@ async def get_history(
     - **actions**: 是否包含分红和拆股信息
 
     注意：使用start/end参数时会忽略period参数
+    支持多数据源降级机制
     """
     logger.info("获取历史数据", symbol=symbol, period=period, interval=interval)
 
@@ -65,7 +74,7 @@ async def get_history(
             raise InvalidParameterError("date", "日期格式必须是 YYYY-MM-DD")
 
     # 获取历史数据
-    history_data = await yfinance_service.get_history(
+    history_data = await manager.get_history(
         symbol=symbol,
         period=period,
         interval=interval,
@@ -76,10 +85,17 @@ async def get_history(
         actions=actions
     )
 
-    return BaseResponse(
+    response = BaseResponse(
         symbol=symbol,
         data=history_data
     )
+
+    # 添加数据源信息
+    if isinstance(history_data, dict) and 'data_source' in history_data:
+        response.data_source = history_data['data_source']
+        response.is_fallback = history_data.get('is_fallback', False)
+
+    return response
 
 
 @router.get("/{symbol}/dividends", response_model=BaseResponse[list])

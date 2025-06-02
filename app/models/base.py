@@ -18,6 +18,10 @@ class BaseResponse(BaseModel, Generic[T]):
     data: T = Field(..., description="响应数据")
     timestamp: datetime = Field(
         default_factory=datetime.now, description="响应时间戳")
+    data_source: Optional[str] = Field(
+        default=None, description="数据来源（yfinance/polygon/etc）")
+    is_fallback: Optional[bool] = Field(
+        default=None, description="是否为降级数据源")
 
     class Config:
         json_encoders = {

@@ -50,11 +50,23 @@ class CustomJsonSerializer(BaseSerializer):
         converted_value = convert_value(value)
         return json.dumps(converted_value, ensure_ascii=False)
 
-    def loads(self, value: str) -> Any:
+    def loads(self, value: Union[str, bytes, None]) -> Any:
         """反序列化数据"""
         if value is None:
             return None
-        return json.loads(value)
+
+        # 确保value是字符串类型
+        if isinstance(value, bytes):
+            value = value.decode('utf-8')
+
+        if not value:  # 空字符串
+            return None
+
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("缓存反序列化失败", value=value, error=str(e))
+            return None
 
 
 def get_cache_backend():
@@ -184,6 +196,47 @@ async def get_cache_info() -> dict:
     except Exception as e:
         logger.error("获取缓存信息失败", error=str(e))
         raise CacheError(f"获取缓存信息失败: {str(e)}")
+
+
+async def get_cache_value(key: str) -> Any:
+    """
+    从缓存获取数据
+
+    Args:
+        key: 缓存键
+
+    Returns:
+        缓存的数据，如果不存在返回None
+    """
+    try:
+        cache_instance = get_cache()
+        result = await cache_instance.get(key)
+        return result
+    except Exception as e:
+        logger.warning("获取缓存失败", key=key, error=str(e))
+        return None
+
+
+async def set_cache_value(key: str, value: Any, ttl: Optional[int] = None) -> bool:
+    """
+    设置缓存数据
+
+    Args:
+        key: 缓存键
+        value: 要缓存的数据
+        ttl: 过期时间(秒)，默认使用配置中的值
+
+    Returns:
+        是否设置成功
+    """
+    try:
+        cache_instance = get_cache()
+        actual_ttl = ttl or settings.cache_ttl_seconds
+        await cache_instance.set(key, value, ttl=actual_ttl)
+        return True
+    except Exception as e:
+        logger.warning("设置缓存失败", key=key, error=str(e))
+        return False
 
 
 # 预配置的缓存装饰器

@@ -1,0 +1,496 @@
+"""
+SEC数据服务
+处理SEC财报数据的业务逻辑和缓存
+"""
+
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta
+import asyncio
+
+from app.data_sources.sec_source import SecDataSource
+from app.models.sec import (
+    CompanyFinancialsResponse,
+    SecNewsResponse,
+    FinancialRatios,
+    SecErrorResponse
+)
+from app.utils.cache import get_cache_value, set_cache_value
+from app.core.logging import get_logger
+from app.utils.exceptions import FinanceAPIException
+from app.core.config import settings
+
+logger = get_logger(__name__)
+
+
+class SecService:
+    """SEC数据服务"""
+
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        初始化SEC服务
+
+        Args:
+            api_key: SEC API密钥，可选
+        """
+        self.data_source = SecDataSource(api_key=api_key)
+
+        # 缓存配置
+        self.cache_config = {
+            'financials': {'ttl': 3600},  # 财务数据缓存1小时
+            'news': {'ttl': 1800},        # 新闻缓存30分钟
+            'ratios': {'ttl': 3600},      # 财务比率缓存1小时
+        }
+
+    async def get_company_financials(
+        self,
+        ticker: str,
+        years: int = 5,
+        include_quarterly: bool = True,
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        获取公司财务数据
+
+        Args:
+            ticker: 股票代码
+            years: 获取年数 (1-10)
+            include_quarterly: 是否包含季度数据
+            use_cache: 是否使用缓存
+
+        Returns:
+            公司财务数据字典
+
+        Raises:
+            FinanceAPIException: 获取数据失败时抛出
+        """
+        # 参数验证
+        if not ticker or not ticker.strip():
+            raise FinanceAPIException("股票代码不能为空")
+
+        if not (1 <= years <= 10):
+            raise FinanceAPIException("年数必须在1-10之间")
+
+        ticker = ticker.upper().strip()
+
+        # 构建缓存键
+        cache_key = f"sec:financials:{ticker}:{years}:{include_quarterly}"
+
+        # 尝试从缓存获取
+        if use_cache:
+            try:
+                cached_data = await get_cache_value(cache_key)
+                if cached_data:
+                    logger.info(f"从缓存获取财务数据: {ticker}")
+                    return cached_data
+            except Exception as e:
+                logger.warning(f"获取缓存失败: {e}")
+
+        try:
+            # 从数据源获取数据
+            logger.info(f"从SEC数据源获取财务数据: {ticker}")
+            result = await self.data_source.get_company_financials(
+                ticker=ticker,
+                years=years,
+                include_quarterly=include_quarterly
+            )
+
+            if not result:
+                raise FinanceAPIException(f"未找到股票代码 {ticker} 的财务数据")
+
+            # 缓存结果
+            if use_cache:
+                try:
+                    await set_cache_value(
+                        cache_key,
+                        result,
+                        ttl=self.cache_config['financials']['ttl']
+                    )
+                    logger.debug(f"财务数据已缓存: {ticker}")
+                except Exception as e:
+                    logger.warning(f"缓存设置失败: {e}")
+
+            return result
+
+        except Exception as e:
+            if isinstance(e, FinanceAPIException):
+                raise
+
+            logger.error(f"获取财务数据失败: {ticker}, 错误: {e}")
+            raise FinanceAPIException(f"获取财务数据失败: {str(e)}")
+
+    async def get_quarterly_revenue(
+        self,
+        ticker: str,
+        quarters: int = 8,
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        获取季度收入情况
+
+        Args:
+            ticker: 股票代码
+            quarters: 获取季度数 (1-20)
+            use_cache: 是否使用缓存
+
+        Returns:
+            季度收入数据字典
+        """
+        if not (1 <= quarters <= 20):
+            raise FinanceAPIException("季度数必须在1-20之间")
+
+        # 获取财务数据
+        financials = await self.get_company_financials(
+            ticker=ticker,
+            years=max(1, quarters // 4 + 1),
+            include_quarterly=True,
+            use_cache=use_cache
+        )
+
+        # 提取季度收入数据
+        quarterly_revenues = []
+        quarterly_data = financials.get('quarterly_financials', [])
+
+        for i, quarter_info in enumerate(quarterly_data[:quarters]):
+            revenue = quarter_info.get('revenue', 0)
+            if revenue:
+                quarterly_revenues.append({
+                    'quarter': quarter_info.get('quarter', f'Q{i+1}'),
+                    'revenue': float(revenue),
+                    'filing_date': quarter_info.get('filing_date', ''),
+                    'fiscal_year': quarter_info.get('fiscal_year', 2023),
+                    'currency': 'USD'
+                })
+
+        # 计算同比增长率
+        for i, current in enumerate(quarterly_revenues):
+            # 寻找同期季度 (一年前)
+            current_year = current['fiscal_year']
+            current_quarter_num = current['quarter']
+
+            for prev in quarterly_revenues[i+1:]:
+                if (prev['fiscal_year'] == current_year - 1 and
+                        prev['quarter'].split()[0] == current_quarter_num.split()[0]):
+                    if prev['revenue'] > 0:
+                        growth_rate = (
+                            (current['revenue'] - prev['revenue']) /
+                            prev['revenue']
+                        ) * 100
+                        current['yoy_growth_rate'] = round(growth_rate, 2)
+                    break
+
+        return {
+            'ticker': ticker,
+            'company_name': financials.get('company_name', f'{ticker} Corporation'),
+            'quarterly_data': quarterly_revenues,
+            'total_quarters': len(quarterly_revenues),
+            'last_updated': datetime.now().isoformat()
+        }
+
+    async def get_company_news(
+        self,
+        ticker: str,
+        limit: int = 20,
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        获取公司SEC新闻
+
+        Args:
+            ticker: 股票代码
+            limit: 新闻数量限制 (1-100)
+            use_cache: 是否使用缓存
+
+        Returns:
+            SEC新闻数据字典
+        """
+        if not (1 <= limit <= 100):
+            raise FinanceAPIException("新闻数量限制必须在1-100之间")
+
+        ticker = ticker.upper().strip()
+        cache_key = f"sec:news:{ticker}:{limit}"
+
+        # 尝试从缓存获取
+        if use_cache:
+            try:
+                cached_data = await get_cache_value(cache_key)
+                if cached_data:
+                    logger.info(f"从缓存获取SEC新闻: {ticker}")
+                    return cached_data
+            except Exception as e:
+                logger.warning(f"获取新闻缓存失败: {e}")
+
+        try:
+            # 从数据源获取数据
+            logger.info(f"从SEC数据源获取新闻: {ticker}")
+            news_items = await self.data_source.get_company_news(
+                ticker=ticker,
+                limit=limit
+            )
+
+            result = {
+                'ticker': ticker,
+                'company_name': f'{ticker} Corporation',
+                'news_items': news_items,
+                'total_count': len(news_items),
+                'last_updated': datetime.now().isoformat()
+            }
+
+            # 缓存结果
+            if use_cache:
+                try:
+                    await set_cache_value(
+                        cache_key,
+                        result,
+                        ttl=self.cache_config['news']['ttl']
+                    )
+                    logger.debug(f"SEC新闻已缓存: {ticker}")
+                except Exception as e:
+                    logger.warning(f"新闻缓存设置失败: {e}")
+
+            return result
+
+        except Exception as e:
+            if isinstance(e, FinanceAPIException):
+                raise
+
+            logger.error(f"获取SEC新闻失败: {ticker}, 错误: {e}")
+            raise FinanceAPIException(f"获取SEC新闻失败: {str(e)}")
+
+    async def get_financial_ratios(
+        self,
+        ticker: str,
+        period: str = "annual",
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        计算财务比率
+
+        Args:
+            ticker: 股票代码
+            period: 期间类型 ("annual" 或 "quarterly")
+            use_cache: 是否使用缓存
+
+        Returns:
+            财务比率数据字典
+        """
+        if period not in ["annual", "quarterly"]:
+            raise FinanceAPIException("期间类型必须是 'annual' 或 'quarterly'")
+
+        ticker = ticker.upper().strip()
+        cache_key = f"sec:ratios:{ticker}:{period}"
+
+        # 尝试从缓存获取
+        if use_cache:
+            try:
+                cached_data = await get_cache_value(cache_key)
+                if cached_data:
+                    logger.info(f"从缓存获取财务比率: {ticker}")
+                    return cached_data
+            except Exception as e:
+                logger.warning(f"获取比率缓存失败: {e}")
+
+        try:
+            # 获取财务数据
+            financials = await self.get_company_financials(
+                ticker=ticker,
+                years=2,
+                include_quarterly=(period == "quarterly"),
+                use_cache=use_cache
+            )
+
+            # 获取最新的财务数据
+            if period == "annual" and financials.get('annual_financials'):
+                latest = financials['annual_financials'][0]
+            elif period == "quarterly" and financials.get('quarterly_financials'):
+                latest = financials['quarterly_financials'][0]
+            else:
+                raise FinanceAPIException(f"未找到 {period} 财务数据")
+
+            # 计算比率
+            ratios = {}
+            period_info = f"{period}_{latest.get('fiscal_year', 2023)}"
+
+            if latest.get('total_assets') and latest.get('total_debt'):
+                # 计算负债权益比
+                if latest.get('total_assets') > 0:
+                    ratios['debt_to_equity'] = round(
+                        float(latest.get('total_debt', 0) /
+                              latest.get('total_assets')), 4
+                    )
+
+                # 计算ROA (需要净利润和总资产)
+                if latest.get('net_income') and latest.get('total_assets') > 0:
+                    ratios['roa'] = round(
+                        float(latest.get('net_income') /
+                              latest.get('total_assets')) * 100, 2
+                    )
+
+                # 计算ROE (使用总资产作为近似)
+                if latest.get('net_income') and latest.get('total_assets') > 0:
+                    ratios['roe'] = round(
+                        float(latest.get('net_income') /
+                              latest.get('total_assets')) * 100, 2
+                    )
+
+            result = {
+                'ticker': ticker,
+                'period': period_info,
+                'ratios': ratios,
+                'calculation_date': datetime.now().isoformat(),
+                'data_source': '模拟数据' if self.data_source._mock_mode else 'SEC EDGAR'
+            }
+
+            # 缓存结果
+            if use_cache:
+                try:
+                    await set_cache_value(
+                        cache_key,
+                        result,
+                        ttl=self.cache_config['ratios']['ttl']
+                    )
+                    logger.debug(f"财务比率已缓存: {ticker}")
+                except Exception as e:
+                    logger.warning(f"比率缓存设置失败: {e}")
+
+            return result
+
+        except Exception as e:
+            if isinstance(e, FinanceAPIException):
+                raise
+
+            logger.error(f"计算财务比率失败: {ticker}, 错误: {e}")
+            raise FinanceAPIException(f"计算财务比率失败: {str(e)}")
+
+    async def get_annual_comparison(
+        self,
+        ticker: str,
+        years: int = 5,
+        use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """
+        获取年度财务对比数据
+
+        Args:
+            ticker: 股票代码
+            years: 对比年数 (2-10)
+            use_cache: 是否使用缓存
+
+        Returns:
+            年度对比数据字典
+        """
+        if not (2 <= years <= 10):
+            raise FinanceAPIException("对比年数必须在2-10之间")
+
+        # 获取财务数据
+        financials = await self.get_company_financials(
+            ticker=ticker,
+            years=years,
+            include_quarterly=False,
+            use_cache=use_cache
+        )
+
+        annual_data = financials.get('annual_financials', [])
+        if len(annual_data) < 2:
+            raise FinanceAPIException(f"需要至少2年的数据进行对比，当前只有{len(annual_data)}年")
+
+        # 构建对比数据
+        comparison_data = []
+        for i, year_data in enumerate(annual_data):
+            item = {
+                'fiscal_year': year_data.get('fiscal_year'),
+                'revenue': year_data.get('revenue', 0),
+                'net_income': year_data.get('net_income', 0),
+                'total_assets': year_data.get('total_assets', 0),
+                'total_debt': year_data.get('total_debt', 0),
+                'filing_date': year_data.get('filing_date', ''),
+            }
+
+            # 计算同比增长率
+            if i < len(annual_data) - 1:
+                prev_year = annual_data[i + 1]
+
+                # 收入增长率
+                if prev_year.get('revenue', 0) > 0:
+                    revenue_growth = (
+                        (item['revenue'] - prev_year.get('revenue', 0)) /
+                        prev_year.get('revenue', 0)
+                    ) * 100
+                    item['revenue_growth_rate'] = round(revenue_growth, 2)
+
+                # 净利润增长率
+                if prev_year.get('net_income', 0) > 0:
+                    income_growth = (
+                        (item['net_income'] - prev_year.get('net_income', 0)) /
+                        prev_year.get('net_income', 0)
+                    ) * 100
+                    item['net_income_growth_rate'] = round(income_growth, 2)
+
+            comparison_data.append(item)
+
+        return {
+            'ticker': ticker,
+            'company_name': financials.get('company_name', f'{ticker} Corporation'),
+            'comparison_years': years,
+            'annual_comparison': comparison_data,
+            'summary': {
+                'total_years': len(comparison_data),
+                'latest_year': comparison_data[0]['fiscal_year'] if comparison_data else None,
+                'earliest_year': comparison_data[-1]['fiscal_year'] if comparison_data else None
+            },
+            'last_updated': datetime.now().isoformat()
+        }
+
+    async def get_health_status(self) -> Dict[str, Any]:
+        """获取SEC服务健康状态"""
+        try:
+            status = await self.data_source.get_health_status()
+            return {
+                'service': 'sec_service',
+                'status': status.get('status', 'unknown'),
+                'data_source_status': status,
+                'cache_enabled': True,
+                'last_checked': datetime.now().isoformat()
+            }
+        except Exception as e:
+            return {
+                'service': 'sec_service',
+                'status': 'unhealthy',
+                'error': str(e),
+                'last_checked': datetime.now().isoformat()
+            }
+
+    async def shutdown(self):
+        """关闭服务"""
+        try:
+            await self.data_source.shutdown()
+            logger.info("SEC服务已关闭")
+        except Exception as e:
+            logger.error(f"关闭SEC服务失败: {e}")
+
+
+# 全局服务实例
+_sec_service: Optional[SecService] = None
+
+
+def get_sec_service() -> SecService:
+    """获取SEC服务实例（单例模式）"""
+    global _sec_service
+    if _sec_service is None:
+        # 使用配置中的API key
+        _sec_service = SecService(api_key=settings.sec_api_key)
+    return _sec_service
+
+
+async def initialize_sec_service(api_key: Optional[str] = None):
+    """初始化SEC服务"""
+    global _sec_service
+    _sec_service = SecService(api_key=api_key)
+    logger.info("SEC服务已初始化")
+
+
+async def shutdown_sec_service():
+    """关闭SEC服务"""
+    global _sec_service
+    if _sec_service:
+        await _sec_service.shutdown()
+        _sec_service = None

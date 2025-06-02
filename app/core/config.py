@@ -40,6 +40,37 @@ class Settings(BaseSettings):
     yf_max_retries: int = Field(
         default=5, env="YF_MAX_RETRIES", description="yfinance最大重试次数")
 
+    # Polygon.io 配置
+    polygon_api_key: str = Field(
+        default="zdPUpzuOXv_kTi02mrjHsRNExCxSdzQv",
+        env="POLYGON_API_KEY",
+        description="Polygon.io API密钥"
+    )
+    polygon_base_url: str = Field(
+        default="https://api.polygon.io",
+        env="POLYGON_BASE_URL",
+        description="Polygon.io API基础URL"
+    )
+    polygon_timeout: int = Field(
+        default=30, env="POLYGON_TIMEOUT", description="Polygon API请求超时时间")
+    polygon_max_retries: int = Field(
+        default=3, env="POLYGON_MAX_RETRIES", description="Polygon API最大重试次数")
+
+    # 降级策略配置
+    fallback_enabled: bool = Field(
+        default=True, env="FALLBACK_ENABLED", description="是否启用降级机制")
+    fallback_timeout: int = Field(
+        default=10, env="FALLBACK_TIMEOUT", description="降级操作超时时间")
+    primary_source_max_failures: int = Field(
+        default=5, env="PRIMARY_SOURCE_MAX_FAILURES",
+        description="主数据源连续失败多少次后触发降级")
+    health_check_interval: int = Field(
+        default=60, env="HEALTH_CHECK_INTERVAL",
+        description="数据源健康检查间隔(秒)")
+    fallback_cooldown_period: int = Field(
+        default=300, env="FALLBACK_COOLDOWN_PERIOD",
+        description="降级冷却期(秒)")
+
     # 日志配置
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_format: str = Field(
@@ -57,6 +88,17 @@ class Settings(BaseSettings):
 
     # Sentry监控 (可选)
     sentry_dsn: Optional[str] = Field(default=None, env="SENTRY_DSN")
+
+    # SEC API 配置
+    sec_api_key: Optional[str] = Field(
+        default=None,
+        env="SEC_API_KEY",
+        description="SEC API密钥，用于获取财务报表数据"
+    )
+    sec_api_timeout: int = Field(
+        default=30, env="SEC_API_TIMEOUT", description="SEC API请求超时时间")
+    sec_api_max_retries: int = Field(
+        default=3, env="SEC_API_MAX_RETRIES", description="SEC API最大重试次数")
 
     class Config:
         env_file = ".env"

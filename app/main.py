@@ -1,6 +1,7 @@
 """
 Finance API 主应用
 基于 FastAPI + yfinance 的金融数据API服务
+支持多数据源降级机制 (yfinance -> Polygon.io)
 """
 
 import time
@@ -24,13 +25,22 @@ from app.utils.exceptions import (
 )
 from app.utils.cache import get_cache_info
 
+# 导入数据源管理器
+from app.services.data_source_manager import DataSourceManager
+from app.services.sec_service import initialize_sec_service, shutdown_sec_service
+
 # 导入路由
 from app.api.v1.quote import router as quote_router
 from app.api.v1.history import router as history_router
+from app.api.v1.test import router as test_router
+from app.api.v1.sec import router as sec_router
 
 # 配置日志
 configure_logging()
 logger = get_logger(__name__)
+
+# 全局数据源管理器实例
+data_source_manager: DataSourceManager = None
 
 # 配置 Sentry (如果提供了 DSN)
 if settings.sentry_dsn:
@@ -46,19 +56,48 @@ if settings.sentry_dsn:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    global data_source_manager
+
     # 启动时执行
     logger.info("Finance API 启动中...", version=settings.app_version)
 
-    # 这里可以添加启动时的初始化逻辑
-    # 例如：数据库连接、缓存预热等
+    # 初始化数据源管理器
+    try:
+        data_source_manager = DataSourceManager()
+        logger.info("数据源管理器初始化成功",
+                    fallback_enabled=settings.fallback_enabled)
+    except Exception as e:
+        logger.error("数据源管理器初始化失败", error=str(e))
+        # 不阻止应用启动，但记录错误
+
+    # 初始化SEC服务
+    try:
+        # 使用配置文件中的API key
+        await initialize_sec_service(api_key=settings.sec_api_key)
+        logger.info("SEC服务初始化成功")
+    except Exception as e:
+        logger.error("SEC服务初始化失败", error=str(e))
+        # 不阻止应用启动，但记录错误
 
     yield
 
     # 关闭时执行
     logger.info("Finance API 关闭中...")
 
-    # 这里可以添加清理逻辑
-    # 例如：关闭数据库连接、清理缓存等
+    # 清理数据源管理器
+    if data_source_manager:
+        try:
+            await data_source_manager.shutdown()
+            logger.info("数据源管理器已关闭")
+        except Exception as e:
+            logger.error("数据源管理器关闭失败", error=str(e))
+
+    # 关闭SEC服务
+    try:
+        await shutdown_sec_service()
+        logger.info("SEC服务已关闭")
+    except Exception as e:
+        logger.error("SEC服务关闭失败", error=str(e))
 
 
 # 创建 FastAPI 应用
@@ -68,24 +107,41 @@ app = FastAPI(
     description="""
     ## Finance API
     
-    基于 yfinance 的金融数据API服务，提供：
+    基于 yfinance 和 SEC EDGAR 的金融数据API服务，提供：
     
     * **实时报价** - 获取股票实时价格和基本信息
     * **历史数据** - 获取K线数据、股息、拆股等历史信息
     * **公司信息** - 获取公司基本资料和财务指标
+    * **SEC财报数据** - 获取美股公司官方财务报表 (NEW!)
     * **批量查询** - 支持多个股票代码的批量查询
     
     ### 数据来源
-    所有数据来源于 Yahoo Finance，请遵守相关使用条款。
+    - **股价数据**: Yahoo Finance
+    - **财报数据**: SEC EDGAR API + XBRL (官方数据源)
+    
+    ### 主要功能
+    #### SEC财报模块 🆕
+    - 年度和季度财务报表 (10-K, 10-Q)  
+    - 损益表、资产负债表、现金流量表
+    - 季度收入趋势和同比增长分析
+    - 年度财务数据对比
+    - SEC文件和新闻动态
+    - 主要财务比率计算
     
     ### 缓存策略
     - 实时报价：缓存1分钟
     - 历史数据：缓存1小时
     - 公司信息：缓存1天
+    - SEC财报数据：缓存1小时
+    - SEC新闻：缓存30分钟
     
     ### 限流
     - 每分钟最多100次请求
     - 批量查询最多支持10个股票代码
+    
+    ### API版本
+    - v1: `/v1/` - 当前稳定版本
+    - SEC模块: `/v1/sec/` - 财报数据专用接口
     """,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -155,19 +211,103 @@ async def health_check():
         dependencies["cache"] = f"error: {str(e)}"
         logger.warning("缓存健康检查失败", error=str(e))
 
-    # 检查 yfinance 状态 (可以尝试获取一个简单的报价)
+    # 检查数据源状态
     try:
-        from app.services.yfinance_service import yfinance_service
-        # 这里可以添加一个简单的yfinance测试
-        dependencies["yfinance"] = "healthy"
+        if data_source_manager:
+            # 获取详细的数据源状态
+            status_summary = data_source_manager.get_status()
+            primary_healthy = any(
+                source["status"] == "healthy"
+                for source in status_summary["sources"]
+            )
+            dependencies["data_sources"] = "healthy" if primary_healthy else "degraded"
+            dependencies["fallback_enabled"] = status_summary["fallback_enabled"]
+        else:
+            dependencies["data_sources"] = "not_initialized"
     except Exception as e:
-        dependencies["yfinance"] = f"error: {str(e)}"
-        logger.warning("yfinance健康检查失败", error=str(e))
+        dependencies["data_sources"] = f"error: {str(e)}"
+        logger.warning("数据源健康检查失败", error=str(e))
 
     return HealthResponse(
         version=settings.app_version,
         dependencies=dependencies
     )
+
+
+# 数据源状态端点
+@app.get("/data-sources/status", tags=["系统"])
+async def get_data_source_status():
+    """
+    获取数据源详细状态
+
+    返回所有数据源的状态、指标和降级信息
+    """
+    if not data_source_manager:
+        return {"error": "数据源管理器未初始化"}
+
+    try:
+        return data_source_manager.get_status()
+    except Exception as e:
+        logger.error("获取数据源状态失败", error=str(e))
+        raise HTTPException(status_code=500, detail=f"获取数据源状态失败: {str(e)}")
+
+
+# 数据源健康检查端点
+@app.get("/data-sources/health", tags=["系统"])
+async def check_data_source_health():
+    """
+    执行数据源健康检查
+
+    主动检查所有数据源的健康状态
+    """
+    if not data_source_manager:
+        return {"error": "数据源管理器未初始化"}
+
+    try:
+        health_results = await data_source_manager.health_check()
+        return health_results
+    except Exception as e:
+        logger.error("数据源健康检查失败", error=str(e))
+        raise HTTPException(status_code=500, detail=f"数据源健康检查失败: {str(e)}")
+
+
+# 手动降级控制端点
+@app.post("/data-sources/fallback", tags=["系统"])
+async def force_fallback(reason: str = "manual"):
+    """
+    手动触发数据源降级
+
+    Args:
+        reason: 降级原因
+    """
+    if not data_source_manager:
+        raise HTTPException(status_code=500, detail="数据源管理器未初始化")
+
+    try:
+        await data_source_manager.force_fallback(reason)
+        return {"message": "降级已触发", "reason": reason}
+    except Exception as e:
+        logger.error("手动触发降级失败", error=str(e))
+        raise HTTPException(status_code=500, detail=f"触发降级失败: {str(e)}")
+
+
+# 重置降级状态端点
+@app.post("/data-sources/reset", tags=["系统"])
+async def reset_fallback():
+    """
+    重置数据源降级状态
+
+    恢复使用主数据源
+    """
+    if not data_source_manager:
+        raise HTTPException(status_code=500, detail="数据源管理器未初始化")
+
+    try:
+        await data_source_manager.reset_fallback()
+        return {"message": "降级状态已重置"}
+    except Exception as e:
+        logger.error("重置降级状态失败", error=str(e))
+        raise HTTPException(status_code=500, detail=f"重置降级状态失败: {str(e)}")
 
 
 # 缓存信息端点
@@ -194,6 +334,18 @@ app.include_router(
     tags=["历史数据"]
 )
 
+app.include_router(
+    test_router,
+    prefix=f"{settings.api_v1_prefix}/test",
+    tags=["测试"]
+)
+
+app.include_router(
+    sec_router,
+    prefix=f"{settings.api_v1_prefix}/sec",
+    tags=["SEC"]
+)
+
 
 # 根路径重定向到文档
 @app.get("/", include_in_schema=False)
@@ -206,6 +358,16 @@ async def root():
         "redoc": "/redoc",
         "health": "/health"
     })
+
+
+def get_data_source_manager() -> DataSourceManager:
+    """
+    获取数据源管理器实例
+    用于依赖注入
+    """
+    if not data_source_manager:
+        raise HTTPException(status_code=500, detail="数据源管理器未初始化")
+    return data_source_manager
 
 
 if __name__ == "__main__":

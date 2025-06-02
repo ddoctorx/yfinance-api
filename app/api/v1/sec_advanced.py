@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.models.base import BaseResponse
-from app.services.sec_advanced_service import get_sec_advanced_service, SecAdvancedService
+from app.services.sec_service import get_sec_service, SecService
 from app.core.logging import get_logger
 from app.utils.exceptions import FinanceAPIException
 
@@ -21,10 +21,16 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["SEC高级功能"])
 
 
-def get_service() -> SecAdvancedService:
-    """依赖注入：获取SEC高级服务实例"""
+def get_service() -> SecService:
+    """依赖注入：获取SEC服务实例"""
     try:
-        return get_sec_advanced_service()
+        service = get_sec_service()
+        if not service.advanced_available:
+            raise FinanceAPIException(
+                message="SEC高级功能不可用，请检查API密钥配置",
+                code="SEC_ADVANCED_UNAVAILABLE"
+            )
+        return service
     except FinanceAPIException as e:
         raise HTTPException(
             status_code=503,
@@ -59,7 +65,7 @@ def get_service() -> SecAdvancedService:
 async def convert_xbrl_to_json(
     filing_url: str = Path(..., description="SEC XBRL文件URL"),
     include_dimensions: bool = Query(True, description="是否包含维度信息"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """
     将XBRL文件转换为JSON格式
@@ -102,7 +108,7 @@ async def get_company_xbrl_data(
     ticker: str,
     form_type: str = Query("10-K", description="报表类型 (10-K, 10-Q)"),
     fiscal_year: Optional[int] = Query(None, description="财政年度"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取公司XBRL数据"""
     try:
@@ -151,7 +157,7 @@ async def full_text_search(
     date_from: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     limit: int = Query(50, ge=1, le=200, description="结果数量限制"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """SEC文件全文搜索"""
     try:
@@ -192,7 +198,7 @@ async def search_company_filings(
     query: str = Query(..., description="搜索查询"),
     form_types: Optional[str] = Query("10-K,10-Q", description="文件类型"),
     years: int = Query(3, ge=1, le=10, description="搜索年数"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """在公司文件中搜索"""
     try:
@@ -239,7 +245,7 @@ async def get_insider_trading(
     ticker: str,
     days_back: int = Query(90, ge=1, le=365, description="查询天数"),
     include_derivatives: bool = Query(True, description="是否包含衍生品交易"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取内幕交易数据"""
     try:
@@ -282,7 +288,7 @@ async def get_institutional_holdings(
     ticker: str,
     quarters: int = Query(4, ge=1, le=8, description="查询季度数"),
     min_value: Optional[int] = Query(None, description="最小持股价值 (美元)"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取机构持股数据"""
     try:
@@ -325,7 +331,7 @@ async def get_recent_ipos(
     days_back: int = Query(30, ge=1, le=365, description="查询天数"),
     min_offering_amount: Optional[int] = Query(
         None, description="最小募资金额 (美元)"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取最近IPO数据"""
     try:
@@ -361,7 +367,7 @@ async def get_recent_ipos(
 )
 async def get_company_ipo_details(
     ticker: str,
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取公司IPO详情"""
     try:
@@ -399,7 +405,7 @@ async def get_company_ipo_details(
 async def get_executive_compensation(
     ticker: str,
     years: int = Query(3, ge=1, le=5, description="查询年数"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取高管薪酬数据"""
     try:
@@ -439,7 +445,7 @@ async def get_company_governance(
     ticker: str,
     include_subsidiaries: bool = Query(True, description="是否包含子公司信息"),
     include_audit_fees: bool = Query(True, description="是否包含审计费用"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取公司治理信息"""
     try:
@@ -479,7 +485,7 @@ async def get_company_governance(
 async def get_recent_enforcement_actions(
     days_back: int = Query(90, ge=1, le=365, description="查询天数"),
     action_type: Optional[str] = Query(None, description="行动类型"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取最近SEC执法行动"""
     try:
@@ -517,7 +523,7 @@ async def get_recent_enforcement_actions(
 async def get_ticker_to_cik_mapping(
     ticker: str,
     include_historical: bool = Query(False, description="是否包含历史映射"),
-    service: SecAdvancedService = Depends(get_service)
+    service: SecService = Depends(get_service)
 ):
     """获取股票代码到CIK映射"""
     try:
@@ -545,7 +551,7 @@ async def get_ticker_to_cik_mapping(
     summary="SEC高级服务健康检查",
     description="检查SEC高级功能服务的健康状态"
 )
-async def health_check(service: SecAdvancedService = Depends(get_service)):
+async def health_check(service: SecService = Depends(get_service)):
     """SEC高级服务健康检查"""
     try:
         status = await service.get_health_status()

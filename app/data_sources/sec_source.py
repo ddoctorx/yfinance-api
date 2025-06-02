@@ -42,62 +42,48 @@ logger = logging.getLogger(__name__)
 class SecDataSource(BaseDataSource):
     """SEC数据源实现"""
 
-    def __init__(self, api_key: Optional[str] = None, use_cache: bool = True):
-        """
-        初始化SEC数据源
-
-        Args:
-            api_key: SEC API密钥 (必需，用于获取官方财务报表数据)
-            use_cache: 是否启用缓存
-
-        Raises:
-            DataSourceError: 当SEC API不可用时抛出
-        """
-        # 初始化基类
-        super().__init__(DataSourceType.ALPHAVANTAGE, "SEC EDGAR")  # 使用ALPHAVANTAGE作为占位符
+    def __init__(self, api_key: str = None):
+        """初始化SEC数据源"""
+        super().__init__(DataSourceType.SEC)
 
         self.api_key = api_key or os.environ.get('SEC_API_KEY')
-        self.use_cache = use_cache
 
-        # 检查SEC API包是否可用
-        if not SEC_API_AVAILABLE:
-            raise DataSourceError(
-                "SEC API功能需要安装 'sec-api' 包。请运行: pip install sec-api"
-            )
+        # 设置SEC API可用性标志
+        self.sec_api_available = SEC_API_AVAILABLE and bool(self.api_key)
 
-        # 检查API密钥是否提供
-        if not self.api_key:
-            raise DataSourceError(
-                "SEC API需要有效的API密钥。请设置环境变量 SEC_API_KEY 或在配置中提供密钥。"
-                "获取API密钥请访问: https://sec-api.io/"
-            )
-
-        # 初始化SEC API客户端
-        try:
-            self.extractor_api = ExtractorApi(api_key=self.api_key)
-            self.query_api = QueryApi(api_key=self.api_key)
-            self.render_api = RenderApi(api_key=self.api_key)
-            self.xbrl_api = XbrlApi(api_key=self.api_key)
-            logger.info("SEC API客户端初始化成功")
-        except Exception as e:
-            logger.error(f"SEC API客户端初始化失败: {e}")
-            raise DataSourceError(f"SEC API客户端初始化失败: {str(e)}")
-
-        # 设置缓存会话
-        if use_cache:
-            self.session = requests_cache.CachedSession(
-                'sec_cache',
-                expire_after=timedelta(hours=1)  # SEC数据缓存1小时
-            )
+        if self.sec_api_available:
+            try:
+                self.query_api = QueryApi(api_key=self.api_key)
+                self.extractor_api = ExtractorApi(api_key=self.api_key)
+                self.render_api = RenderApi(api_key=self.api_key)
+                self.xbrl_api = XbrlApi(api_key=self.api_key)
+                logger.info("SEC API已初始化")
+            except Exception as e:
+                logger.warning(f"SEC API初始化失败，将使用免费API: {e}")
+                self.sec_api_available = False
         else:
-            self.session = requests.Session()
+            self.query_api = None
+            self.extractor_api = None
+            self.render_api = None
+            self.xbrl_api = None
+            if not self.api_key:
+                logger.info("未配置SEC API密钥，将使用免费的SEC.gov API")
+            else:
+                logger.warning("SEC API库不可用，将使用免费的SEC.gov API")
 
-        # 设置请求头
+        # 配置请求头
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json, text/html, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'YFinance-API/1.0 (https://example.com/contact)',
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate'
         }
+
+        # 设置缓存
+        self.session = requests_cache.CachedSession(
+            cache_name='sec_cache',
+            expire_after=timedelta(hours=1),
+            backend='memory'
+        )
 
     # 实现DataSourceInterface要求的抽象方法
     async def get_fast_quote(self, symbol: str) -> FastQuoteData:
@@ -202,182 +188,163 @@ class SecDataSource(BaseDataSource):
         actions: bool = True
     ) -> Dict[str, Any]:
         """
-        获取历史数据
-        SEC数据源不提供价格历史数据，返回空数据
+        SEC数据源不提供历史价格数据
         """
-        logger.warning(f"SEC数据源不支持历史价格数据，返回空数据: {symbol}")
+        logger.warning(f"SEC数据源不支持历史价格数据: {symbol}")
         return {
-            'symbol': symbol,
-            'data': [],
-            'metadata': {
-                'source': 'SEC EDGAR',
-                'note': 'SEC data source does not provide price history'
-            }
+            'dates': [],
+            'open': [],
+            'high': [],
+            'low': [],
+            'close': [],
+            'volume': [],
+            'message': 'SEC数据源不提供历史价格数据'
         }
 
     async def get_batch_quotes(self, symbols: List[str]) -> Dict[str, FastQuoteData]:
-        """
-        批量获取报价数据
-        SEC数据源不提供实时报价，返回空数据
-        """
-        logger.warning(f"SEC数据源不支持批量报价，返回空数据: {symbols}")
-        result = {}
-        for symbol in symbols:
-            result[symbol] = await self.get_fast_quote(symbol)
-        return result
+        """获取批量快速报价"""
+        logger.warning("SEC数据源不支持批量报价")
+        return {symbol: await self.get_fast_quote(symbol) for symbol in symbols}
 
     async def health_check(self) -> bool:
         """健康检查"""
         try:
-            # 使用免费的SEC.gov端点测试连接
-            response = requests.get("https://www.sec.gov/edgar/searchedgar/companysearch.html",
-                                    timeout=10)
-            return response.status_code == 200
+            # 执行一个简单的查询来测试API连接
+            query = {
+                "query": "formType:\"10-K\"",
+                "from": "0",
+                "size": "1",
+                "sort": [{"filedAt": {"order": "desc"}}]
+            }
+            response = self.query_api.get_filings(query)
+            return bool(response and 'filings' in response)
         except Exception as e:
-            logger.error(f"SEC数据源健康检查失败: {e}")
+            logger.error(f"SEC API健康检查失败: {e}")
             return False
 
     async def get_health_status(self) -> Dict[str, Any]:
-        """获取数据源健康状态"""
+        """获取健康状态详情"""
         try:
-            # 测试EDGAR API连通性
-            edgar_url = "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/Revenues.json"
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(edgar_url, headers=self.headers) as response:
-                    if response.status == 200:
-                        return {
-                            "status": "healthy",
-                            "response_time": getattr(response, 'response_time', 0),
-                            "api_available": self.api_key is not None,
-                            "cache_enabled": self.use_cache
-                        }
-                    else:
-                        return {
-                            "status": "degraded",
-                            "message": f"EDGAR API返回状态码: {response.status}",
-                            "api_available": self.api_key is not None
-                        }
+            is_healthy = await self.health_check()
+            return {
+                'status': 'healthy' if is_healthy else 'unhealthy',
+                'source': 'SEC EDGAR',
+                'api_key_configured': bool(self.api_key),
+                'cache_enabled': True,
+                'last_checked': datetime.now().isoformat()
+            }
         except Exception as e:
             return {
-                "status": "unhealthy",
-                "error": str(e),
-                "api_available": self.api_key is not None
+                'status': 'unhealthy',
+                'source': 'SEC EDGAR',
+                'error': str(e),
+                'last_checked': datetime.now().isoformat()
             }
 
     def _get_cik_from_ticker(self, ticker: str) -> Optional[str]:
         """
         从股票代码获取CIK
-
-        Args:
-            ticker: 股票代码
-
-        Returns:
-            CIK字符串或None
+        使用SEC.gov免费API
         """
         try:
-            # 使用SEC的company tickers映射
-            url = "https://www.sec.gov/files/company_tickers.json"
-            response = self.session.get(url, headers=self.headers)
+            # 获取公司代码映射
+            tickers_url = "https://www.sec.gov/files/company_tickers.json"
+            response = requests.get(
+                tickers_url, headers=self.headers, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
-                for company_info in data.values():
-                    if company_info.get('ticker', '').upper() == ticker.upper():
-                        cik = str(company_info.get('cik_str', '')).zfill(10)
-                        return cik
-
-            logger.warning(f"未找到股票代码 {ticker} 对应的CIK")
+                for key, company in data.items():
+                    if company.get('ticker', '').upper() == ticker.upper():
+                        return str(company.get('cik_str'))
             return None
-
         except Exception as e:
-            logger.error(f"获取CIK失败: {e}")
+            logger.error(f"获取CIK失败: {ticker}, 错误: {e}")
             return None
 
     def _fetch_company_concept_data(self, cik: str, concept: str) -> Optional[Dict]:
-        """
-        获取公司概念数据
-
-        Args:
-            cik: 公司CIK
-            concept: 财务概念 (如 Revenues, Assets等)
-
-        Returns:
-            概念数据字典或None
-        """
+        """获取公司概念数据（从SEC.gov免费API）"""
         try:
-            url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/{concept}.json"
-            response = self.session.get(url, headers=self.headers)
+            # 格式化CIK（需要10位数字，前面补0）
+            formatted_cik = f"{int(cik):010d}"
+
+            # SEC.gov的公司概念API
+            url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{formatted_cik}/us-gaap/{concept}.json"
+
+            response = requests.get(url, headers=self.headers, timeout=15)
 
             if response.status_code == 200:
                 return response.json()
-            else:
-                logger.warning(
-                    f"获取概念数据失败: {concept}, 状态码: {response.status_code}")
+            elif response.status_code == 404:
+                logger.info(f"概念 {concept} 对CIK {cik} 不存在")
                 return None
-
+            else:
+                logger.warning(f"获取概念数据失败: HTTP {response.status_code}")
+                return None
         except Exception as e:
-            logger.error(f"获取概念数据异常: {concept}, 错误: {e}")
+            logger.error(f"获取概念数据失败: {concept}, 错误: {e}")
             return None
 
     def _parse_financial_data(self, concept_data: Dict, years: int = 5) -> Dict[str, List]:
-        """
-        解析财务数据
-
-        Args:
-            concept_data: 概念数据字典
-            years: 获取年数
-
-        Returns:
-            包含年度和季度数据的字典
-        """
-        annual_data = []
-        quarterly_data = []
-
+        """解析财务概念数据"""
         try:
-            # 获取当前日期
-            current_date = datetime.now()
-            cutoff_date = current_date - timedelta(days=365 * years)
+            result = {
+                'annual': [],
+                'quarterly': []
+            }
 
-            # 解析10-K年度数据
-            for form_type in ['10-K', '10-K/A']:
-                if form_type in concept_data.get('units', {}).get('USD', {}):
-                    for item in concept_data['units']['USD'][form_type]:
-                        end_date = datetime.strptime(item['end'], '%Y-%m-%d')
-                        if end_date >= cutoff_date:
-                            annual_data.append({
-                                'end_date': end_date,
-                                'value': item.get('val'),
-                                'filed_date': datetime.strptime(item['filed'], '%Y-%m-%d'),
-                                'form': form_type,
-                                'period': item.get('fp', 'FY')
-                            })
+            # 解析年度数据
+            if 'units' in concept_data and 'USD' in concept_data['units']:
+                usd_data = concept_data['units']['USD']
 
-            # 解析10-Q季度数据
-            for form_type in ['10-Q', '10-Q/A']:
-                if form_type in concept_data.get('units', {}).get('USD', {}):
-                    for item in concept_data['units']['USD'][form_type]:
-                        end_date = datetime.strptime(item['end'], '%Y-%m-%d')
-                        if end_date >= cutoff_date:
-                            quarterly_data.append({
-                                'end_date': end_date,
-                                'value': item.get('val'),
-                                'filed_date': datetime.strptime(item['filed'], '%Y-%m-%d'),
-                                'form': form_type,
-                                'period': item.get('fp', 'Q1')
-                            })
+                # 过滤年度数据（form为10-K）
+                annual_items = [
+                    item for item in usd_data
+                    if item.get('form') == '10-K' and 'fy' in item
+                ]
 
-            # 按日期排序
-            annual_data.sort(key=lambda x: x['end_date'], reverse=True)
-            quarterly_data.sort(key=lambda x: x['end_date'], reverse=True)
+                # 按年度排序
+                annual_items.sort(key=lambda x: x.get('fy', 0), reverse=True)
 
+                for item in annual_items[:years]:
+                    result['annual'].append({
+                        'fiscal_year': item.get('fy'),
+                        'value': item.get('val', 0),
+                        'filing_date': item.get('filed', ''),
+                        'start_date': item.get('start', ''),
+                        'end_date': item.get('end', ''),
+                        'accession_number': item.get('accn', ''),
+                        'form_type': item.get('form', '')
+                    })
+
+                # 过滤季度数据（form为10-Q）
+                quarterly_items = [
+                    item for item in usd_data
+                    if item.get('form') == '10-Q' and 'fy' in item and 'fp' in item
+                ]
+
+                # 按年度和季度排序
+                quarterly_items.sort(
+                    key=lambda x: (x.get('fy', 0), x.get('fp', '')),
+                    reverse=True
+                )
+
+                for item in quarterly_items[:years*4]:  # 最多years*4个季度
+                    result['quarterly'].append({
+                        'fiscal_year': item.get('fy'),
+                        'quarter': f"Q{item.get('fp', 'X')} {item.get('fy', '')}",
+                        'value': item.get('val', 0),
+                        'filing_date': item.get('filed', ''),
+                        'start_date': item.get('start', ''),
+                        'end_date': item.get('end', ''),
+                        'accession_number': item.get('accn', ''),
+                        'form_type': item.get('form', '')
+                    })
+
+            return result
         except Exception as e:
-            logger.error(f"解析财务数据异常: {e}")
-
-        return {
-            'annual': annual_data[:years],  # 限制年数
-            'quarterly': quarterly_data[:years * 4]  # 限制季度数
-        }
+            logger.error(f"解析财务数据失败: {e}")
+            return {'annual': [], 'quarterly': []}
 
     async def get_company_financials(
         self,
@@ -389,12 +356,12 @@ class SecDataSource(BaseDataSource):
         获取公司财务数据
 
         Args:
-            ticker: 公司股票代码
-            years: 获取的年份数量
+            ticker: 股票代码
+            years: 获取年数 (1-10)
             include_quarterly: 是否包含季度数据
 
         Returns:
-            包含财务数据的字典
+            包含年度和季度财务数据的字典
 
         Raises:
             DataSourceError: 当获取数据失败时抛出
@@ -403,142 +370,115 @@ class SecDataSource(BaseDataSource):
             # 首先获取公司CIK
             cik = await self._get_company_cik(ticker)
             if not cik:
-                raise DataSourceError(f"无法找到股票代码 {ticker} 对应的CIK")
+                # 尝试使用内置的CIK查找
+                cik = self._get_cik_from_ticker(ticker)
+                if not cik:
+                    raise DataSourceError(f"无法找到股票代码 {ticker} 对应的CIK")
 
-            # 使用SEC API获取财务数据
-            return await self._get_sec_api_data(ticker, cik, years, include_quarterly)
+            if self.sec_api_available:
+                # 使用SEC API获取文件信息，然后结合免费API获取数据
+                return await self._get_hybrid_sec_data(ticker, cik, years, include_quarterly)
+            else:
+                # 仅使用免费的SEC.gov API
+                return await self._get_free_sec_data(ticker, years, include_quarterly)
 
-        except DataSourceError:
-            # 重新抛出DataSourceError
-            raise
         except Exception as e:
-            logger.error(f"获取公司财务数据失败 {ticker}: {e}")
+            logger.error(f"获取SEC财务数据失败: {ticker}, 错误: {e}")
             raise DataSourceError(f"获取SEC财务数据失败: {str(e)}")
 
-    async def _get_sec_api_data(self, ticker: str, cik: int, years: int, include_quarterly: bool) -> Dict[str, Any]:
-        """使用SEC API获取财务数据"""
+    async def _get_hybrid_sec_data(self, ticker: str, cik: str, years: int, include_quarterly: bool) -> Dict[str, Any]:
+        """结合SEC API文件信息和免费API的财务数据"""
         try:
-            # 构建查询
-            query = {
-                "query": f"ticker:{ticker} AND filedAt:[2018-01-01 TO *]",
+            # 1. 使用SEC API获取最新的文件信息
+            query_payload = {
+                "query": f"ticker:\"{ticker}\" AND (formType:\"10-K\" OR formType:\"10-Q\")",
                 "from": "0",
-                "size": "50",
+                "size": "20",
                 "sort": [{"filedAt": {"order": "desc"}}]
             }
 
-            # 查询SEC文件
-            response = self.query_api.get_filings(query)
-
-            if not response or 'filings' not in response:
-                raise DataSourceError(f"未找到股票代码 {ticker} 的SEC文件")
-
-            filings = response['filings']
-            if not filings:
-                raise DataSourceError(f"股票代码 {ticker} 无可用的财务数据")
-
-            # 解析财务数据
-            annual_data = []
-            quarterly_data = []
-
-            for filing in filings:
-                form_type = filing.get('formType', '')
-                fiscal_year = filing.get('fiscalYear')
-                filing_date = filing.get('filedAt', '')
-
-                if form_type == '10-K' and fiscal_year and len(annual_data) < years:
-                    # 提取年度财务数据
-                    try:
-                        xbrl_data = self.xbrl_api.xbrl_to_json(
-                            filing.get('linkToFilingDetails', ''))
-                        if xbrl_data:
-                            annual_item = self._extract_annual_data(
-                                xbrl_data, fiscal_year, filing_date)
-                            if annual_item:
-                                annual_data.append(annual_item)
-                    except Exception as e:
-                        logger.warning(f"解析年度数据失败: {e}")
-
-                elif form_type == '10-Q' and include_quarterly and fiscal_year:
-                    # 提取季度财务数据
-                    try:
-                        xbrl_data = self.xbrl_api.xbrl_to_json(
-                            filing.get('linkToFilingDetails', ''))
-                        if xbrl_data:
-                            quarterly_item = self._extract_quarterly_data(
-                                xbrl_data, fiscal_year, filing_date)
-                            if quarterly_item:
-                                quarterly_data.append(quarterly_item)
-                    except Exception as e:
-                        logger.warning(f"解析季度数据失败: {e}")
-
-            return {
-                'ticker': ticker,
-                'company_name': filings[0].get('companyName', f'{ticker} Corporation'),
-                'cik': str(cik),
-                'annual_financials': annual_data,
-                'quarterly_financials': quarterly_data if include_quarterly else []
+            headers = {
+                'Authorization': self.api_key,
+                'Content-Type': 'application/json'
             }
 
+            filing_info = {}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    'https://api.sec-api.io',
+                    json=query_payload,
+                    headers=headers,
+                    timeout=30
+                ) as response:
+                    if response.status == 200:
+                        api_response = await response.json()
+                        if api_response and 'filings' in api_response:
+                            filings = api_response['filings']
+
+                            # 组织文件信息以供后续使用
+                            for filing in filings:
+                                form_type = filing.get('formType')
+                                fiscal_year = self._extract_fiscal_year(filing)
+                                if fiscal_year and form_type:
+                                    key = f"{form_type}_{fiscal_year}"
+                                    filing_info[key] = {
+                                        'filed_at': filing.get('filedAt'),
+                                        'accession_no': filing.get('accessionNo'),
+                                        'company_name': filing.get('companyName'),
+                                        'link': filing.get('linkToFilingDetails')
+                                    }
+
+            # 2. 使用免费SEC.gov API获取实际财务数据
+            financial_data = await self._get_free_sec_data(ticker, years, include_quarterly)
+
+            # 3. 增强财务数据与文件信息
+            if filing_info:
+                company_name = next(iter(filing_info.values())).get(
+                    'company_name', f'{ticker} Corporation')
+                financial_data['company_name'] = company_name
+
+                # 为年度数据添加文件信息
+                for annual_item in financial_data.get('annual_financials', []):
+                    fiscal_year = annual_item.get('fiscal_year')
+                    file_key = f"10-K_{fiscal_year}"
+                    if file_key in filing_info:
+                        annual_item.update({
+                            'sec_filing_url': filing_info[file_key].get('link'),
+                            'accession_number': filing_info[file_key].get('accession_no')
+                        })
+
+                # 为季度数据添加文件信息
+                for quarterly_item in financial_data.get('quarterly_financials', []):
+                    fiscal_year = quarterly_item.get('fiscal_year')
+                    file_key = f"10-Q_{fiscal_year}"
+                    if file_key in filing_info:
+                        quarterly_item.update({
+                            'sec_filing_url': filing_info[file_key].get('link'),
+                            'accession_number': filing_info[file_key].get('accession_no')
+                        })
+
+            return financial_data
+
         except Exception as e:
-            logger.error(f"SEC API获取财务数据失败: {e}")
-            raise DataSourceError(f"SEC API数据获取失败: {str(e)}")
+            logger.warning(f"混合模式获取失败，回退到免费API: {e}")
+            return await self._get_free_sec_data(ticker, years, include_quarterly)
 
-    def _extract_annual_data(self, xbrl_data: Dict, fiscal_year: int, filing_date: str) -> Optional[Dict]:
-        """从XBRL数据中提取年度财务数据"""
+    def _extract_fiscal_year(self, filing: Dict) -> Optional[int]:
+        """从filing中提取财政年度"""
         try:
-            # 提取关键财务指标
-            revenue = self._extract_financial_value(
-                xbrl_data, ['Revenues', 'Revenue', 'SalesRevenueNet'])
-            net_income = self._extract_financial_value(
-                xbrl_data, ['NetIncomeLoss', 'NetIncome'])
-            total_assets = self._extract_financial_value(
-                xbrl_data, ['Assets', 'AssetsCurrent'])
-            total_debt = self._extract_financial_value(
-                xbrl_data, ['Liabilities', 'LiabilitiesCurrent'])
+            # 尝试从periodOfReport提取
+            period_str = filing.get('periodOfReport', '')
+            if period_str:
+                # 格式通常是 YYYY-MM-DD
+                return int(period_str.split('-')[0])
 
-            return {
-                'fiscal_year': fiscal_year,
-                'revenue': revenue or 0,
-                'net_income': net_income or 0,
-                'total_assets': total_assets or 0,
-                'total_debt': total_debt or 0,
-                'filing_date': filing_date
-            }
-        except Exception as e:
-            logger.error(f"提取年度数据失败: {e}")
+            # 尝试从filedAt提取
+            filed_str = filing.get('filedAt', '')
+            if filed_str:
+                return int(filed_str.split('-')[0])
+
             return None
-
-    def _extract_quarterly_data(self, xbrl_data: Dict, fiscal_year: int, filing_date: str) -> Optional[Dict]:
-        """从XBRL数据中提取季度财务数据"""
-        try:
-            revenue = self._extract_financial_value(
-                xbrl_data, ['Revenues', 'Revenue', 'SalesRevenueNet'])
-            net_income = self._extract_financial_value(
-                xbrl_data, ['NetIncomeLoss', 'NetIncome'])
-
-            return {
-                'quarter': f"Q{((fiscal_year - 1) % 4) + 1} {fiscal_year}",
-                'fiscal_year': fiscal_year,
-                'revenue': revenue or 0,
-                'net_income': net_income or 0,
-                'filing_date': filing_date
-            }
-        except Exception as e:
-            logger.error(f"提取季度数据失败: {e}")
-            return None
-
-    def _extract_financial_value(self, xbrl_data: Dict, field_names: List[str]) -> Optional[float]:
-        """从XBRL数据中提取财务数值"""
-        try:
-            for field_name in field_names:
-                if field_name in xbrl_data:
-                    value = xbrl_data[field_name]
-                    if isinstance(value, (int, float)):
-                        return float(value)
-                    elif isinstance(value, str) and value.replace('-', '').replace('.', '').isdigit():
-                        return float(value)
-            return None
-        except (ValueError, TypeError):
+        except (ValueError, IndexError):
             return None
 
     async def _get_free_sec_data(self, ticker: str, years: int, include_quarterly: bool) -> Dict[str, Any]:
@@ -549,24 +489,103 @@ class SecDataSource(BaseDataSource):
             if not cik:
                 raise DataSourceError(f"无法找到股票代码 {ticker} 对应的CIK")
 
-            # 获取公司概念数据
-            concepts_url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010d}/us-gaap/Revenues.json"
+            # 获取多个财务概念的数据
+            financial_concepts = {
+                'revenue': ['Revenues', 'SalesRevenueNet', 'RevenueFromContractWithCustomerExcludingAssessedTax'],
+                'net_income': ['NetIncomeLoss', 'ProfitLoss', 'NetIncome'],
+                'total_assets': ['Assets', 'AssetsCurrent'],
+                'total_debt': ['DebtCurrent', 'LongTermDebt', 'Liabilities']
+            }
 
-            response = requests.get(
-                concepts_url, headers=self.headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                return self._parse_sec_concepts_data(data, ticker, years, include_quarterly)
-            else:
-                logger.warning(f"SEC.gov API请求失败: {response.status_code}")
-                raise DataSourceError(
-                    f"SEC.gov API请求失败: HTTP {response.status_code}")
+            all_data = {}
+
+            # 获取每个概念的数据
+            for concept_name, concept_variations in financial_concepts.items():
+                for concept in concept_variations:
+                    data = self._fetch_company_concept_data(cik, concept)
+                    if data:
+                        all_data[concept_name] = self._parse_financial_data(
+                            data, years)
+                        break  # 找到数据就停止尝试其他变体
+
+            # 组合所有财务数据
+            result = {
+                'ticker': ticker,
+                'company_name': f'{ticker} Corporation',
+                'cik': str(cik),
+                'annual_financials': [],
+                'quarterly_financials': []
+            }
+
+            # 构建年度财务数据
+            if 'revenue' in all_data and all_data['revenue']['annual']:
+                annual_revenue = all_data['revenue']['annual']
+
+                for i, revenue_item in enumerate(annual_revenue):
+                    fiscal_year = revenue_item['fiscal_year']
+
+                    annual_financial = {
+                        'fiscal_year': fiscal_year,
+                        'revenue': revenue_item['value'],
+                        'net_income': 0,
+                        'total_assets': 0,
+                        'total_debt': 0,
+                        'filing_date': revenue_item['filing_date'],
+                        'accession_number': revenue_item['accession_number'],
+                        'form_type': revenue_item['form_type']
+                    }
+
+                    # 添加其他财务指标
+                    for metric, data_dict in all_data.items():
+                        if metric != 'revenue' and data_dict['annual']:
+                            # 找到相同财年的数据
+                            matching_item = next(
+                                (item for item in data_dict['annual']
+                                 if item['fiscal_year'] == fiscal_year),
+                                None
+                            )
+                            if matching_item:
+                                annual_financial[metric] = matching_item['value']
+
+                    result['annual_financials'].append(annual_financial)
+
+            # 构建季度财务数据
+            if include_quarterly and 'revenue' in all_data and all_data['revenue']['quarterly']:
+                quarterly_revenue = all_data['revenue']['quarterly']
+
+                for revenue_item in quarterly_revenue:
+                    fiscal_year = revenue_item['fiscal_year']
+                    quarter = revenue_item['quarter']
+
+                    quarterly_financial = {
+                        'quarter': quarter,
+                        'fiscal_year': fiscal_year,
+                        'revenue': revenue_item['value'],
+                        'net_income': 0,
+                        'filing_date': revenue_item['filing_date'],
+                        'accession_number': revenue_item['accession_number'],
+                        'form_type': revenue_item['form_type']
+                    }
+
+                    # 添加净利润数据
+                    if 'net_income' in all_data and all_data['net_income']['quarterly']:
+                        matching_income = next(
+                            (item for item in all_data['net_income']['quarterly']
+                             if item['fiscal_year'] == fiscal_year and item['quarter'] == quarter),
+                            None
+                        )
+                        if matching_income:
+                            quarterly_financial['net_income'] = matching_income['value']
+
+                    result['quarterly_financials'].append(quarterly_financial)
+
+            return result
 
         except Exception as e:
             logger.error(f"获取免费SEC数据失败: {e}")
             raise DataSourceError(f"获取SEC数据失败: {str(e)}")
 
-    async def _get_company_cik(self, ticker: str) -> Optional[int]:
+    async def _get_company_cik(self, ticker: str) -> Optional[str]:
         """获取公司的CIK号码"""
         try:
             # 使用SEC.gov的公司搜索API
@@ -578,51 +597,75 @@ class SecDataSource(BaseDataSource):
                 data = response.json()
                 for key, company in data.items():
                     if company.get('ticker', '').upper() == ticker.upper():
-                        return company.get('cik_str')
-
+                        return str(company.get('cik_str'))
             return None
         except Exception as e:
-            logger.error(f"获取CIK失败: {e}")
+            logger.error(f"获取CIK失败: {ticker}, 错误: {e}")
             return None
 
     def _parse_sec_concepts_data(self, data: Dict, ticker: str, years: int, include_quarterly: bool) -> Dict[str, Any]:
         """解析SEC概念数据"""
         try:
-            company_info = data.get('entityName', f'{ticker} Corporation')
-            cik = data.get('cik', '0001234567')
-
-            # 解析年度和季度数据
-            units = data.get('units', {})
-            usd_data = units.get('USD', [])
-
-            # 按年度和季度分组数据
             annual_data = []
             quarterly_data = []
+            company_info = data.get('entityName', f'{ticker} Corporation')
+            cik = data.get('cik')
 
-            for item in usd_data:
-                filing_date = item.get('filed')
-                form_type = item.get('form', '')
-                fiscal_year = item.get('fy')
-                revenue = item.get('val', 0)
+            if 'units' in data and 'USD' in data['units']:
+                usd_data = data['units']['USD']
 
-                if form_type == '10-K' and fiscal_year:
+                # 按年份分组年度数据
+                annual_by_year = {}
+                for item in usd_data:
+                    if item.get('form') == '10-K' and item.get('fy'):
+                        fiscal_year = item['fy']
+                        if fiscal_year not in annual_by_year:
+                            annual_by_year[fiscal_year] = []
+                        annual_by_year[fiscal_year].append(item)
+
+                # 处理年度数据
+                sorted_years = sorted(
+                    annual_by_year.keys(), reverse=True)[:years]
+                for year in sorted_years:
+                    items = annual_by_year[year]
+                    # 取该年最新的数据
+                    latest_item = max(items, key=lambda x: x.get('filed', ''))
+                    revenue = latest_item.get('val', 0)
+                    filing_date = latest_item.get('filed', '')
+
                     annual_data.append({
-                        'fiscal_year': fiscal_year,
+                        'fiscal_year': year,
                         'revenue': revenue,
-                        'net_income': revenue * 0.2,  # 估算
-                        'total_assets': revenue * 3,  # 估算
-                        'total_debt': revenue * 0.5,  # 估算
+                        'net_income': revenue * 0.2,  # 估算净利润
                         'filing_date': filing_date
                     })
-                elif form_type == '10-Q' and include_quarterly and fiscal_year:
-                    quarter = item.get('fp', 'Q1')
-                    quarterly_data.append({
-                        'quarter': f"{quarter} {fiscal_year}",
-                        'fiscal_year': fiscal_year,
-                        'revenue': revenue,
-                        'net_income': revenue * 0.2,
-                        'filing_date': filing_date
-                    })
+
+                # 处理季度数据
+                if include_quarterly:
+                    quarterly_by_period = {}
+                    for item in usd_data:
+                        if item.get('form') == '10-Q' and item.get('fy') and item.get('fp'):
+                            period_key = f"{item['fy']}-{item['fp']}"
+                            if period_key not in quarterly_by_period:
+                                quarterly_by_period[period_key] = []
+                            quarterly_by_period[period_key].append(item)
+
+                    sorted_periods = sorted(
+                        quarterly_by_period.keys(), reverse=True)[:20]
+                    for period in sorted_periods:
+                        items = quarterly_by_period[period]
+                        latest_item = max(
+                            items, key=lambda x: x.get('filed', ''))
+                        revenue = latest_item.get('val', 0)
+                        filing_date = latest_item.get('filed', '')
+
+                        quarterly_data.append({
+                            'quarter': f"Q{latest_item.get('fp', 'Unknown')} {latest_item.get('fy', 'Unknown')}",
+                            'fiscal_year': latest_item.get('fy'),
+                            'revenue': revenue,
+                            'net_income': revenue * 0.2,
+                            'filing_date': filing_date
+                        })
 
             # 按年份排序，取最近几年
             annual_data = sorted(
@@ -676,7 +719,7 @@ class SecDataSource(BaseDataSource):
             DataSourceError: 当获取数据失败时抛出
         """
         try:
-            # 使用SEC API获取最近的文件提交
+            # 使用正确的SEC API获取最近的文件提交
             return await self._get_sec_api_filings(ticker, limit, days_back)
 
         except Exception as e:
@@ -684,7 +727,7 @@ class SecDataSource(BaseDataSource):
             raise DataSourceError(f"获取SEC新闻数据失败: {str(e)}")
 
     async def _get_sec_api_filings(self, ticker: str, limit: int, days_back: int) -> List[Dict[str, Any]]:
-        """使用SEC API获取最近的文件提交"""
+        """使用正确的SEC API获取最近的文件提交"""
         try:
             from datetime import datetime, timedelta
 
@@ -692,21 +735,60 @@ class SecDataSource(BaseDataSource):
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days_back)
 
-            # 构建查询
-            query = {
-                "query": f"ticker:{ticker} AND filedAt:[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]",
+            # 根据官方文档构建正确的查询
+            query_payload = {
+                "query": f"ticker:\"{ticker}\" AND filedAt:[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]",
                 "from": "0",
                 "size": str(limit),
                 "sort": [{"filedAt": {"order": "desc"}}]
             }
 
-            # 查询SEC文件
-            response = self.query_api.get_filings(query)
+            # 使用正确的认证方式
+            headers = {
+                'Authorization': self.api_key,
+                'Content-Type': 'application/json'
+            }
 
-            if not response or 'filings' not in response:
-                raise DataSourceError(f"未找到股票代码 {ticker} 的SEC文件")
+            # 发送POST请求到正确的API端点
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    'https://api.sec-api.io',
+                    json=query_payload,
+                    headers=headers,
+                    timeout=30
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.warning(
+                            f"SEC API调用失败: HTTP {response.status}, {error_text}")
 
-            filings = response['filings']
+                        # 如果ticker查询失败，尝试使用CIK
+                        cik = await self._get_company_cik(ticker)
+                        if cik:
+                            query_payload[
+                                "query"] = f"cik:\"{cik}\" AND filedAt:[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]"
+
+                            async with session.post(
+                                'https://api.sec-api.io',
+                                json=query_payload,
+                                headers=headers,
+                                timeout=30
+                            ) as cik_response:
+                                if cik_response.status == 200:
+                                    api_response = await cik_response.json()
+                                else:
+                                    raise DataSourceError(
+                                        f"SEC API查询失败: HTTP {cik_response.status}")
+                        else:
+                            raise DataSourceError(
+                                f"SEC API查询失败: HTTP {response.status}")
+                    else:
+                        api_response = await response.json()
+
+            if not api_response or 'filings' not in api_response:
+                return []
+
+            filings = api_response['filings']
             news_items = []
 
             for filing in filings:
@@ -740,7 +822,13 @@ class SecDataSource(BaseDataSource):
             '10-Q': '季度报告，包含未经审计的财务报表和管理层讨论',
             '8-K': '当期报告，披露重大公司事件或变化',
             '20-F': '外国公司年度报告',
-            'DEF 14A': '委托书说明书，通常用于股东大会'
+            'DEF 14A': '委托书说明书，通常用于股东大会',
+            'S-1': '首次公开发行注册声明',
+            '424B4': '最终招股说明书',
+            '13F-HR': '机构投资者持股报告',
+            '4': '内部人交易报告',
+            '3': '内部人初始持股报告',
+            '5': '内部人年度持股声明'
         }
         return descriptions.get(form_type, f'{form_type} 文件提交')
 

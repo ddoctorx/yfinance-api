@@ -522,14 +522,16 @@ def get_sec_service() -> SecService:
     """获取SEC服务实例（单例模式）"""
     global _sec_service
     if _sec_service is None:
-        # 检查是否有API密钥
-        if not settings.sec_api_key:
-            raise FinanceAPIException(
-                message="SEC服务需要有效的API密钥。请设置环境变量 SEC_API_KEY 或在配置中提供密钥。获取API密钥请访问: https://sec-api.io/",
-                code="SEC_API_KEY_MISSING"
-            )
         try:
-            _sec_service = SecService(api_key=settings.sec_api_key)
+            # 尝试使用配置的API密钥，如果没有则使用免费API
+            api_key = getattr(settings, 'sec_api_key', None)
+            _sec_service = SecService(api_key=api_key)
+
+            if api_key:
+                logger.info("SEC服务已初始化（使用API密钥）")
+            else:
+                logger.info("SEC服务已初始化（使用免费API）")
+
         except Exception as e:
             logger.error(f"SEC服务初始化失败: {e}")
             raise FinanceAPIException(

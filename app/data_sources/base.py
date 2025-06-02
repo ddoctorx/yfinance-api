@@ -24,6 +24,7 @@ class DataSourceType(Enum):
     YFINANCE = "yfinance"
     POLYGON = "polygon"
     ALPHAVANTAGE = "alphavantage"
+    SEC = "sec"
 
 
 class DataSourceStatus(Enum):

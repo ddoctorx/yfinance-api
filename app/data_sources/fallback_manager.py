@@ -166,7 +166,17 @@ class FallbackManager:
 
     async def _try_fallback_sources(self, method_name: str, **kwargs) -> Any:
         """尝试降级数据源"""
+        if not self.fallback_sources:
+            logger.warning("没有可用的降级数据源")
+            # 没有降级数据源时，抛出服务不可用异常
+            from app.utils.exceptions import FinanceAPIException
+            raise FinanceAPIException(
+                message="数据源服务不可用，且没有可用的备用数据源",
+                code="SERVICE_UNAVAILABLE"
+            )
+
         last_error = None
+        last_error_type = None
 
         for fallback_source in self.fallback_sources:
             try:
@@ -200,6 +210,7 @@ class FallbackManager:
 
             except Exception as e:
                 last_error = e
+                last_error_type = type(e)
                 logger.warning(
                     "降级数据源操作失败",
                     method=method_name,
@@ -208,8 +219,49 @@ class FallbackManager:
                 )
                 continue
 
-        # 所有数据源都失败了
-        raise Exception(f"所有数据源都不可用，最后错误: {str(last_error)}")
+        # 所有数据源都失败了，根据错误类型抛出合适的异常
+        from app.utils.exceptions import FinanceAPIException, TickerNotFoundError
+        from app.data_sources.base import DataSourceError
+
+        error_message = str(last_error) if last_error else "所有数据源都不可用"
+
+        # 首先检查异常类型
+        if last_error_type and issubclass(last_error_type, TickerNotFoundError):
+            # 重新抛出原始的TickerNotFoundError，它会被正确处理
+            raise last_error
+
+        # 检查是否是数据不存在的错误（如无效股票代码） - 基于字符串
+        elif last_error and ("未找到股票代码" in error_message or
+                             "NOT_FOUND" in error_message or
+                             "Invalid symbol" in error_message or
+                             "No data found" in error_message):
+            raise FinanceAPIException(
+                message=f"股票代码不存在或无效: {kwargs.get('symbol', '未知')}",
+                code="INVALID_SYMBOL"
+            )
+
+        # 检查是否是权限/认证错误
+        elif last_error and ("NOT_AUTHORIZED" in error_message or
+                             "UNAUTHORIZED" in error_message or
+                             "权限不足" in error_message):
+            raise FinanceAPIException(
+                message="数据源权限不足，请检查API密钥配置",
+                code="INSUFFICIENT_PERMISSIONS"
+            )
+
+        # 检查是否是超时错误
+        elif last_error_type and issubclass(last_error_type, asyncio.TimeoutError):
+            raise FinanceAPIException(
+                message="数据源响应超时，请稍后重试",
+                code="TIMEOUT_ERROR"
+            )
+
+        # 其他情况作为服务不可用错误
+        else:
+            raise FinanceAPIException(
+                message=f"所有数据源都不可用: {error_message}",
+                code="SERVICE_UNAVAILABLE"
+            )
 
     def _should_use_fallback(self) -> bool:
         """判断是否应该直接使用降级源"""
@@ -221,11 +273,12 @@ class FallbackManager:
         if self.primary_source.get_status() == DataSourceStatus.UNHEALTHY:
             return True
 
-        # 检查是否在冷却期内
-        if self.last_failure_time:
-            time_since_failure = time.time() - self.last_failure_time
-            if time_since_failure < self.cooldown_period:
-                return True
+        # 冷却期逻辑：只有在达到最大失败次数后才考虑冷却期
+        # 这样可以避免单次失败就触发长时间的降级
+        # if self.last_failure_time:
+        #     time_since_failure = time.time() - self.last_failure_time
+        #     if time_since_failure < self.cooldown_period:
+        #         return True
 
         return False
 

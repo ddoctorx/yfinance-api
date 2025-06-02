@@ -47,8 +47,11 @@ class SecDataSource(BaseDataSource):
         初始化SEC数据源
 
         Args:
-            api_key: SEC API密钥 (可选，未提供时使用免费额度)
+            api_key: SEC API密钥 (必需，用于获取官方财务报表数据)
             use_cache: 是否启用缓存
+
+        Raises:
+            DataSourceError: 当SEC API不可用时抛出
         """
         # 初始化基类
         super().__init__(DataSourceType.ALPHAVANTAGE, "SEC EDGAR")  # 使用ALPHAVANTAGE作为占位符
@@ -56,23 +59,29 @@ class SecDataSource(BaseDataSource):
         self.api_key = api_key or os.environ.get('SEC_API_KEY')
         self.use_cache = use_cache
 
+        # 检查SEC API包是否可用
         if not SEC_API_AVAILABLE:
-            logger.warning("sec-api包未安装，将使用模拟数据模式")
-            self._mock_mode = True
-        elif not self.api_key:
-            logger.warning("SEC API密钥未提供，将使用模拟数据模式")
-            self._mock_mode = True
-        else:
-            self._mock_mode = False
-            try:
-                self.extractor_api = ExtractorApi(api_key=self.api_key)
-                self.query_api = QueryApi(api_key=self.api_key)
-                self.render_api = RenderApi(api_key=self.api_key)
-                self.xbrl_api = XbrlApi(api_key=self.api_key)
-                logger.info("SEC API客户端初始化成功")
-            except Exception as e:
-                logger.error(f"SEC API客户端初始化失败: {e}")
-                self._mock_mode = True
+            raise DataSourceError(
+                "SEC API功能需要安装 'sec-api' 包。请运行: pip install sec-api"
+            )
+
+        # 检查API密钥是否提供
+        if not self.api_key:
+            raise DataSourceError(
+                "SEC API需要有效的API密钥。请设置环境变量 SEC_API_KEY 或在配置中提供密钥。"
+                "获取API密钥请访问: https://sec-api.io/"
+            )
+
+        # 初始化SEC API客户端
+        try:
+            self.extractor_api = ExtractorApi(api_key=self.api_key)
+            self.query_api = QueryApi(api_key=self.api_key)
+            self.render_api = RenderApi(api_key=self.api_key)
+            self.xbrl_api = XbrlApi(api_key=self.api_key)
+            logger.info("SEC API客户端初始化成功")
+        except Exception as e:
+            logger.error(f"SEC API客户端初始化失败: {e}")
+            raise DataSourceError(f"SEC API客户端初始化失败: {str(e)}")
 
         # 设置缓存会话
         if use_cache:
@@ -220,10 +229,6 @@ class SecDataSource(BaseDataSource):
     async def health_check(self) -> bool:
         """健康检查"""
         try:
-            if self._mock_mode:
-                logger.info("使用模拟模式，返回健康状态")
-                return True
-
             # 使用免费的SEC.gov端点测试连接
             response = requests.get("https://www.sec.gov/edgar/searchedgar/companysearch.html",
                                     timeout=10)
@@ -390,19 +395,151 @@ class SecDataSource(BaseDataSource):
 
         Returns:
             包含财务数据的字典
+
+        Raises:
+            DataSourceError: 当获取数据失败时抛出
         """
         try:
-            if self._mock_mode:
-                logger.info(f"使用模拟模式获取 {ticker} 财务数据")
-                return self._get_mock_financial_data(ticker)
+            # 首先获取公司CIK
+            cik = await self._get_company_cik(ticker)
+            if not cik:
+                raise DataSourceError(f"无法找到股票代码 {ticker} 对应的CIK")
 
-            # 如果没有API密钥，使用免费的SEC.gov数据
-            return await self._get_free_sec_data(ticker, years, include_quarterly)
+            # 使用SEC API获取财务数据
+            return await self._get_sec_api_data(ticker, cik, years, include_quarterly)
 
+        except DataSourceError:
+            # 重新抛出DataSourceError
+            raise
         except Exception as e:
             logger.error(f"获取公司财务数据失败 {ticker}: {e}")
-            # 降级到模拟数据
-            return self._get_mock_financial_data(ticker)
+            raise DataSourceError(f"获取SEC财务数据失败: {str(e)}")
+
+    async def _get_sec_api_data(self, ticker: str, cik: int, years: int, include_quarterly: bool) -> Dict[str, Any]:
+        """使用SEC API获取财务数据"""
+        try:
+            # 构建查询
+            query = {
+                "query": f"ticker:{ticker} AND filedAt:[2018-01-01 TO *]",
+                "from": "0",
+                "size": "50",
+                "sort": [{"filedAt": {"order": "desc"}}]
+            }
+
+            # 查询SEC文件
+            response = self.query_api.get_filings(query)
+
+            if not response or 'filings' not in response:
+                raise DataSourceError(f"未找到股票代码 {ticker} 的SEC文件")
+
+            filings = response['filings']
+            if not filings:
+                raise DataSourceError(f"股票代码 {ticker} 无可用的财务数据")
+
+            # 解析财务数据
+            annual_data = []
+            quarterly_data = []
+
+            for filing in filings:
+                form_type = filing.get('formType', '')
+                fiscal_year = filing.get('fiscalYear')
+                filing_date = filing.get('filedAt', '')
+
+                if form_type == '10-K' and fiscal_year and len(annual_data) < years:
+                    # 提取年度财务数据
+                    try:
+                        xbrl_data = self.xbrl_api.xbrl_to_json(
+                            filing.get('linkToFilingDetails', ''))
+                        if xbrl_data:
+                            annual_item = self._extract_annual_data(
+                                xbrl_data, fiscal_year, filing_date)
+                            if annual_item:
+                                annual_data.append(annual_item)
+                    except Exception as e:
+                        logger.warning(f"解析年度数据失败: {e}")
+
+                elif form_type == '10-Q' and include_quarterly and fiscal_year:
+                    # 提取季度财务数据
+                    try:
+                        xbrl_data = self.xbrl_api.xbrl_to_json(
+                            filing.get('linkToFilingDetails', ''))
+                        if xbrl_data:
+                            quarterly_item = self._extract_quarterly_data(
+                                xbrl_data, fiscal_year, filing_date)
+                            if quarterly_item:
+                                quarterly_data.append(quarterly_item)
+                    except Exception as e:
+                        logger.warning(f"解析季度数据失败: {e}")
+
+            return {
+                'ticker': ticker,
+                'company_name': filings[0].get('companyName', f'{ticker} Corporation'),
+                'cik': str(cik),
+                'annual_financials': annual_data,
+                'quarterly_financials': quarterly_data if include_quarterly else []
+            }
+
+        except Exception as e:
+            logger.error(f"SEC API获取财务数据失败: {e}")
+            raise DataSourceError(f"SEC API数据获取失败: {str(e)}")
+
+    def _extract_annual_data(self, xbrl_data: Dict, fiscal_year: int, filing_date: str) -> Optional[Dict]:
+        """从XBRL数据中提取年度财务数据"""
+        try:
+            # 提取关键财务指标
+            revenue = self._extract_financial_value(
+                xbrl_data, ['Revenues', 'Revenue', 'SalesRevenueNet'])
+            net_income = self._extract_financial_value(
+                xbrl_data, ['NetIncomeLoss', 'NetIncome'])
+            total_assets = self._extract_financial_value(
+                xbrl_data, ['Assets', 'AssetsCurrent'])
+            total_debt = self._extract_financial_value(
+                xbrl_data, ['Liabilities', 'LiabilitiesCurrent'])
+
+            return {
+                'fiscal_year': fiscal_year,
+                'revenue': revenue or 0,
+                'net_income': net_income or 0,
+                'total_assets': total_assets or 0,
+                'total_debt': total_debt or 0,
+                'filing_date': filing_date
+            }
+        except Exception as e:
+            logger.error(f"提取年度数据失败: {e}")
+            return None
+
+    def _extract_quarterly_data(self, xbrl_data: Dict, fiscal_year: int, filing_date: str) -> Optional[Dict]:
+        """从XBRL数据中提取季度财务数据"""
+        try:
+            revenue = self._extract_financial_value(
+                xbrl_data, ['Revenues', 'Revenue', 'SalesRevenueNet'])
+            net_income = self._extract_financial_value(
+                xbrl_data, ['NetIncomeLoss', 'NetIncome'])
+
+            return {
+                'quarter': f"Q{((fiscal_year - 1) % 4) + 1} {fiscal_year}",
+                'fiscal_year': fiscal_year,
+                'revenue': revenue or 0,
+                'net_income': net_income or 0,
+                'filing_date': filing_date
+            }
+        except Exception as e:
+            logger.error(f"提取季度数据失败: {e}")
+            return None
+
+    def _extract_financial_value(self, xbrl_data: Dict, field_names: List[str]) -> Optional[float]:
+        """从XBRL数据中提取财务数值"""
+        try:
+            for field_name in field_names:
+                if field_name in xbrl_data:
+                    value = xbrl_data[field_name]
+                    if isinstance(value, (int, float)):
+                        return float(value)
+                    elif isinstance(value, str) and value.replace('-', '').replace('.', '').isdigit():
+                        return float(value)
+            return None
+        except (ValueError, TypeError):
+            return None
 
     async def _get_free_sec_data(self, ticker: str, years: int, include_quarterly: bool) -> Dict[str, Any]:
         """使用免费的SEC.gov API获取数据"""
@@ -422,11 +559,12 @@ class SecDataSource(BaseDataSource):
                 return self._parse_sec_concepts_data(data, ticker, years, include_quarterly)
             else:
                 logger.warning(f"SEC.gov API请求失败: {response.status_code}")
-                return self._get_mock_financial_data(ticker)
+                raise DataSourceError(
+                    f"SEC.gov API请求失败: HTTP {response.status_code}")
 
         except Exception as e:
             logger.error(f"获取免费SEC数据失败: {e}")
-            return self._get_mock_financial_data(ticker)
+            raise DataSourceError(f"获取SEC数据失败: {str(e)}")
 
     async def _get_company_cik(self, ticker: str) -> Optional[int]:
         """获取公司的CIK号码"""
@@ -502,7 +640,7 @@ class SecDataSource(BaseDataSource):
 
         except Exception as e:
             logger.error(f"解析SEC概念数据失败: {e}")
-            return self._get_mock_financial_data(ticker)
+            raise DataSourceError(f"解析SEC概念数据失败: {str(e)}")
 
     def _get_value_for_period(self, concept_data: Dict, concept: str, period_type: str, index: int) -> Optional[Decimal]:
         """获取指定期间的数值"""
@@ -533,92 +671,67 @@ class SecDataSource(BaseDataSource):
 
         Returns:
             SEC新闻项目列表
+
+        Raises:
+            DataSourceError: 当获取数据失败时抛出
         """
         try:
-            if self._mock_mode:
-                logger.info(f"使用模拟模式获取 {ticker} 新闻数据")
-                return self._get_mock_news_data(ticker)[:limit]
-
-            # 使用免费的SEC.gov数据获取最近的文件提交
-            return await self._get_free_sec_filings(ticker, limit, days_back)
+            # 使用SEC API获取最近的文件提交
+            return await self._get_sec_api_filings(ticker, limit, days_back)
 
         except Exception as e:
             logger.error(f"获取公司SEC新闻失败 {ticker}: {e}")
-            # 降级到模拟数据
-            return self._get_mock_news_data(ticker)[:limit]
+            raise DataSourceError(f"获取SEC新闻数据失败: {str(e)}")
 
-    async def _get_free_sec_filings(self, ticker: str, limit: int, days_back: int) -> List[Dict[str, Any]]:
-        """使用免费的SEC.gov API获取最近的文件提交"""
+    async def _get_sec_api_filings(self, ticker: str, limit: int, days_back: int) -> List[Dict[str, Any]]:
+        """使用SEC API获取最近的文件提交"""
         try:
-            # 获取CIK
-            cik = await self._get_company_cik(ticker)
-            if not cik:
-                return self._get_mock_news_data(ticker)[:limit]
+            from datetime import datetime, timedelta
 
-            # 获取公司最近提交的文件
-            submissions_url = f"https://data.sec.gov/submissions/CIK{cik:010d}.json"
-            response = requests.get(
-                submissions_url, headers=self.headers, timeout=30)
+            # 计算查询日期范围
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back)
 
-            if response.status_code == 200:
-                data = response.json()
-                return self._parse_sec_filings_data(data, ticker, limit, days_back)
-            else:
-                logger.warning(f"SEC提交数据请求失败: {response.status_code}")
-                return self._get_mock_news_data(ticker)[:limit]
+            # 构建查询
+            query = {
+                "query": f"ticker:{ticker} AND filedAt:[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]",
+                "from": "0",
+                "size": str(limit),
+                "sort": [{"filedAt": {"order": "desc"}}]
+            }
 
-        except Exception as e:
-            logger.error(f"获取免费SEC文件提交失败: {e}")
-            return self._get_mock_news_data(ticker)[:limit]
+            # 查询SEC文件
+            response = self.query_api.get_filings(query)
 
-    def _parse_sec_filings_data(self, data: Dict, ticker: str, limit: int, days_back: int) -> List[Dict[str, Any]]:
-        """解析SEC文件提交数据"""
-        try:
-            filings = []
-            recent_filings = data.get('filings', {}).get('recent', {})
+            if not response or 'filings' not in response:
+                raise DataSourceError(f"未找到股票代码 {ticker} 的SEC文件")
 
-            forms = recent_filings.get('form', [])
-            filing_dates = recent_filings.get('filingDate', [])
-            accession_numbers = recent_filings.get('accessionNumber', [])
+            filings = response['filings']
+            news_items = []
 
-            # 计算截止日期
-            cutoff_date = datetime.now() - timedelta(days=days_back)
-
-            for i, (form, filing_date, accession) in enumerate(zip(forms, filing_dates, accession_numbers)):
+            for filing in filings:
                 try:
-                    # 检查日期是否在范围内
-                    file_date = datetime.strptime(filing_date, '%Y-%m-%d')
-                    if file_date < cutoff_date:
-                        continue
-
-                    # 只关注主要的财务报表类型
-                    if form in ['10-K', '10-Q', '8-K', '20-F', 'DEF 14A']:
-                        # 构建文件URL
-                        accession_clean = accession.replace('-', '')
-                        filing_url = f"https://www.sec.gov/Archives/edgar/data/{data.get('cik')}/{accession_clean}/{accession}-index.htm"
-
-                        filing_info = {
-                            'title': f"{ticker} 提交 {form} 文件",
-                            'summary': self._get_form_description(form),
-                            'url': filing_url,
-                            'filing_type': form,
-                            'filing_date': filing_date,
-                            'accession_number': accession
-                        }
-                        filings.append(filing_info)
-
-                        if len(filings) >= limit:
-                            break
-
-                except (ValueError, KeyError) as e:
-                    logger.warning(f"解析文件项目失败: {e}")
+                    news_item = {
+                        'title': f"{filing.get('formType', 'Unknown')} - {filing.get('companyName', ticker)}",
+                        'description': self._get_form_description(filing.get('formType', '')),
+                        'url': filing.get('linkToFilingDetails', ''),
+                        'published_at': filing.get('filedAt', ''),
+                        'form_type': filing.get('formType', ''),
+                        'company_name': filing.get('companyName', ''),
+                        'cik': filing.get('cik', ''),
+                        'accession_number': filing.get('accessionNo', ''),
+                        'source': 'SEC EDGAR'
+                    }
+                    news_items.append(news_item)
+                except Exception as e:
+                    logger.warning(f"解析SEC文件失败: {e}")
                     continue
 
-            return filings
+            return news_items
 
         except Exception as e:
-            logger.error(f"解析SEC文件提交数据失败: {e}")
-            return self._get_mock_news_data(ticker)[:limit]
+            logger.error(f"SEC API获取文件提交失败: {e}")
+            raise DataSourceError(f"SEC API数据获取失败: {str(e)}")
 
     def _get_form_description(self, form_type: str) -> str:
         """获取表单类型的描述"""
@@ -699,64 +812,9 @@ class SecDataSource(BaseDataSource):
             logger.error(f"关闭SEC数据源失败: {e}")
 
     def _get_mock_financial_data(self, ticker: str) -> Dict[str, Any]:
-        """返回模拟财务数据用于测试"""
-        return {
-            "ticker": ticker,
-            "company_name": f"{ticker} Corporation",
-            "cik": "0001234567",
-            "annual_financials": [
-                {
-                    "fiscal_year": 2023,
-                    "revenue": 100000000000,
-                    "net_income": 20000000000,
-                    "total_assets": 300000000000,
-                    "total_debt": 50000000000,
-                    "filing_date": "2024-02-01"
-                },
-                {
-                    "fiscal_year": 2022,
-                    "revenue": 90000000000,
-                    "net_income": 18000000000,
-                    "total_assets": 280000000000,
-                    "total_debt": 45000000000,
-                    "filing_date": "2023-02-01"
-                }
-            ],
-            "quarterly_financials": [
-                {
-                    "quarter": "Q3 2023",
-                    "fiscal_year": 2023,
-                    "revenue": 26000000000,
-                    "net_income": 5200000000,
-                    "filing_date": "2023-10-26"
-                },
-                {
-                    "quarter": "Q2 2023",
-                    "fiscal_year": 2023,
-                    "revenue": 25000000000,
-                    "net_income": 5000000000,
-                    "filing_date": "2023-07-26"
-                }
-            ]
-        }
+        """已移除：不再提供模拟财务数据"""
+        raise DataSourceError("SEC数据源不提供模拟数据。请配置有效的SEC API密钥。")
 
     def _get_mock_news_data(self, ticker: str) -> List[Dict[str, Any]]:
-        """返回模拟新闻数据用于测试"""
-        return [
-            {
-                "title": f"{ticker} 发布季度财报",
-                "summary": f"{ticker}公司发布了最新的季度财报，显示营收增长强劲。",
-                "url": f"https://www.sec.gov/ix?doc=/Archives/edgar/data/1234567/000123456724000001/mock-{ticker.lower()}-10q.htm",
-                "filing_type": "10-Q",
-                "filing_date": "2024-01-26",
-                "accession_number": "0001234567-24-000001"
-            },
-            {
-                "title": f"{ticker} 年度报告",
-                "summary": f"{ticker}公司发布年度10-K报告，详细披露了公司业务状况。",
-                "url": f"https://www.sec.gov/ix?doc=/Archives/edgar/data/1234567/000123456724000002/mock-{ticker.lower()}-10k.htm",
-                "filing_type": "10-K",
-                "filing_date": "2024-02-01",
-                "accession_number": "0001234567-24-000002"
-            }
-        ]
+        """已移除：不再提供模拟新闻数据"""
+        raise DataSourceError("SEC数据源不提供模拟数据。请配置有效的SEC API密钥。")

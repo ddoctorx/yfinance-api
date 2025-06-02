@@ -41,8 +41,8 @@ class Settings(BaseSettings):
         default=5, env="YF_MAX_RETRIES", description="yfinance最大重试次数")
 
     # Polygon.io 配置
-    polygon_api_key: str = Field(
-        default="zdPUpzuOXv_kTi02mrjHsRNExCxSdzQv",
+    polygon_api_key: Optional[str] = Field(
+        default=None,
         env="POLYGON_API_KEY",
         description="Polygon.io API密钥"
     )
@@ -104,6 +104,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # 忽略额外的环境变量
 
 
 # 创建全局配置实例

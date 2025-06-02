@@ -27,16 +27,23 @@ router = APIRouter(tags=["SEC财报数据"])
 
 def get_service() -> SecService:
     """依赖注入：获取SEC服务实例"""
-    from app.services.sec_service import _sec_service
-    if _sec_service is None:
-        # 如果没有初始化，使用配置中的API key创建新实例
-        from app.core.config import settings
-        return SecService(api_key=settings.sec_api_key)
-    return _sec_service
+    try:
+        return get_sec_service()
+    except FinanceAPIException as e:
+        # 抛出HTTP异常，提供清晰的错误信息
+        raise HTTPException(
+            status_code=503,  # Service Unavailable
+            detail={
+                "error": "SEC服务不可用",
+                "message": str(e),
+                "solution": "请检查SEC API密钥配置或联系管理员"
+            }
+        )
 
 
 @router.get(
     "/financials/{ticker}",
+    response_model=BaseResponse[Dict[str, Any]],
     summary="获取公司财务数据",
     description="""
     获取美股公司的财务报表数据，包括损益表、资产负债表和现金流量表。
@@ -82,7 +89,13 @@ async def get_company_financials(
 
         logger.info(
             f"成功获取财务数据: {ticker}, 年度数据: {len(result.get('annual_financials', []))}, 季度数据: {len(result.get('quarterly_financials', []))}")
-        return result
+
+        return BaseResponse(
+            symbol=ticker,
+            data=result,
+            data_source="sec_edgar",
+            is_fallback=False
+        )
 
     except FinanceAPIException as e:
         logger.warning(f"财务数据请求失败: {ticker}, 错误: {e}")
@@ -96,6 +109,7 @@ async def get_company_financials(
 
 @router.get(
     "/quarterly-revenue/{ticker}",
+    response_model=BaseResponse[Dict[str, Any]],
     summary="获取季度收入数据",
     description="""
     获取公司最近若干季度的收入情况，包括同比增长率计算。
@@ -134,7 +148,13 @@ async def get_quarterly_revenue(
         )
 
         logger.info(f"成功获取季度收入: {ticker}, 季度数: {result['total_quarters']}")
-        return result
+
+        return BaseResponse(
+            symbol=ticker,
+            data=result,
+            data_source="sec_edgar",
+            is_fallback=False
+        )
 
     except FinanceAPIException as e:
         logger.warning(f"季度收入请求失败: {ticker}, 错误: {e}")
@@ -146,6 +166,7 @@ async def get_quarterly_revenue(
 
 @router.get(
     "/annual-comparison/{ticker}",
+    response_model=BaseResponse[Dict[str, Any]],
     summary="获取年度财务对比",
     description="""
     获取公司年度财务数据对比，包括收入、净利润、资产等关键指标的年度变化。
@@ -183,8 +204,14 @@ async def get_annual_comparison(
             use_cache=use_cache
         )
 
-        logger.info(f"成功获取年度对比: {ticker}, 年数: {result['years_covered']}")
-        return result
+        logger.info(f"成功获取年度对比: {ticker}, 年数: {result['comparison_years']}")
+
+        return BaseResponse(
+            symbol=ticker,
+            data=result,
+            data_source="sec_edgar",
+            is_fallback=False
+        )
 
     except FinanceAPIException as e:
         logger.warning(f"年度对比请求失败: {ticker}, 错误: {e}")
@@ -196,6 +223,7 @@ async def get_annual_comparison(
 
 @router.get(
     "/news/{ticker}",
+    response_model=BaseResponse[Dict[str, Any]],
     summary="获取SEC新闻和文件",
     description="""
     获取公司最近提交的SEC文件和相关新闻。
@@ -228,7 +256,7 @@ async def get_company_news(
     - **use_cache**: 是否使用缓存
     """
     try:
-        logger.info(f"获取SEC新闻请求: {ticker}, 数量: {limit}")
+        logger.info(f"获取SEC新闻请求: {ticker}, 限制: {limit}")
 
         result = await service.get_company_news(
             ticker=ticker,
@@ -236,21 +264,26 @@ async def get_company_news(
             use_cache=use_cache
         )
 
-        logger.info(f"成功获取SEC新闻: {ticker}, 数量: {result.get('total_count', 0)}")
-        return result
+        logger.info(f"成功获取SEC新闻: {ticker}, 数量: {result['total_count']}")
+
+        return BaseResponse(
+            symbol=ticker,
+            data=result,
+            data_source="sec_edgar",
+            is_fallback=False
+        )
 
     except FinanceAPIException as e:
         logger.warning(f"SEC新闻请求失败: {ticker}, 错误: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"SEC新闻请求异常: {ticker}, 错误: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"获取SEC新闻失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取SEC新闻失败，请稍后重试")
 
 
 @router.get(
     "/ratios/{ticker}",
+    response_model=BaseResponse[Dict[str, Any]],
     summary="获取财务比率",
     description="""
     计算公司主要财务比率。
@@ -281,7 +314,7 @@ async def get_financial_ratios(
     获取财务比率
 
     - **ticker**: 美股股票代码
-    - **period**: 期间类型，annual(年度) 或 quarterly(季度)
+    - **period**: 期间类型，annual(年度)或quarterly(季度)
     - **use_cache**: 是否使用缓存
     """
     try:
@@ -293,12 +326,14 @@ async def get_financial_ratios(
             use_cache=use_cache
         )
 
-        if result:
-            logger.info(f"成功获取财务比率: {ticker}")
-        else:
-            logger.info(f"未能计算财务比率: {ticker} (数据不足)")
+        logger.info(f"成功获取财务比率: {ticker}, 期间: {period}")
 
-        return result
+        return BaseResponse(
+            symbol=ticker,
+            data=result,
+            data_source="sec_edgar",
+            is_fallback=False
+        )
 
     except FinanceAPIException as e:
         logger.warning(f"财务比率请求失败: {ticker}, 错误: {e}")
@@ -310,36 +345,32 @@ async def get_financial_ratios(
 
 @router.get(
     "/health",
+    response_model=Dict[str, Any],
     summary="SEC服务健康检查",
     description="检查SEC数据源和服务的健康状态"
 )
 async def health_check(service: SecService = Depends(get_service)):
-    """SEC服务健康检查"""
+    """
+    SEC服务健康检查
+
+    检查SEC数据源连接状态和服务可用性
+    """
     try:
+        logger.info("SEC健康检查请求")
+
         status = await service.get_health_status()
 
-        if status['status'] == 'healthy':
-            return JSONResponse(
-                status_code=200,
-                content=status
-            )
-        else:
-            return JSONResponse(
-                status_code=503,
-                content=status
-            )
+        logger.info(f"SEC健康检查完成, 状态: {status.get('status')}")
+        return status
 
     except Exception as e:
         logger.error(f"SEC健康检查失败: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                'service': 'sec_service',
-                'status': 'unhealthy',
-                'error': str(e),
-                'last_checked': datetime.now().isoformat()
-            }
-        )
+        return {
+            "service": "sec_service",
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 
 @router.get(

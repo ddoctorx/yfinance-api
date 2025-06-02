@@ -202,6 +202,7 @@ async def health_check():
     检查API服务状态和依赖服务状态
     """
     dependencies = {}
+    overall_healthy = True
 
     # 检查缓存状态
     try:
@@ -209,6 +210,7 @@ async def health_check():
         dependencies["cache"] = "healthy"
     except Exception as e:
         dependencies["cache"] = f"error: {str(e)}"
+        overall_healthy = False
         logger.warning("缓存健康检查失败", error=str(e))
 
     # 检查数据源状态
@@ -222,16 +224,36 @@ async def health_check():
             )
             dependencies["data_sources"] = "healthy" if primary_healthy else "degraded"
             dependencies["fallback_enabled"] = status_summary["fallback_enabled"]
+
+            if not primary_healthy:
+                overall_healthy = False
         else:
             dependencies["data_sources"] = "not_initialized"
+            overall_healthy = False
     except Exception as e:
         dependencies["data_sources"] = f"error: {str(e)}"
+        overall_healthy = False
         logger.warning("数据源健康检查失败", error=str(e))
 
-    return HealthResponse(
-        version=settings.app_version,
-        dependencies=dependencies
-    )
+    # 确定响应状态
+    if overall_healthy:
+        return HealthResponse(
+            success=True,
+            code="HEALTHY",
+            message="服务运行正常",
+            status="healthy",
+            version=settings.app_version,
+            dependencies=dependencies
+        )
+    else:
+        return HealthResponse(
+            success=False,
+            code="DEGRADED",
+            message="服务运行异常或降级",
+            status="degraded",
+            version=settings.app_version,
+            dependencies=dependencies
+        )
 
 
 # 数据源状态端点

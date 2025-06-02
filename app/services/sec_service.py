@@ -30,9 +30,19 @@ class SecService:
         初始化SEC服务
 
         Args:
-            api_key: SEC API密钥，可选
+            api_key: SEC API密钥（必需）
+
+        Raises:
+            FinanceAPIException: 当SEC API不可用时抛出
         """
-        self.data_source = SecDataSource(api_key=api_key)
+        try:
+            self.data_source = SecDataSource(api_key=api_key)
+        except Exception as e:
+            logger.error(f"SEC数据源初始化失败: {e}")
+            raise FinanceAPIException(
+                message=f"SEC服务不可用: {str(e)}",
+                code="SEC_SERVICE_UNAVAILABLE"
+            )
 
         # 缓存配置
         self.cache_config = {
@@ -65,10 +75,16 @@ class SecService:
         """
         # 参数验证
         if not ticker or not ticker.strip():
-            raise FinanceAPIException("股票代码不能为空")
+            raise FinanceAPIException(
+                message="股票代码不能为空",
+                code="INVALID_TICKER"
+            )
 
         if not (1 <= years <= 10):
-            raise FinanceAPIException("年数必须在1-10之间")
+            raise FinanceAPIException(
+                message="年数必须在1-10之间",
+                code="INVALID_YEARS"
+            )
 
         ticker = ticker.upper().strip()
 
@@ -95,7 +111,10 @@ class SecService:
             )
 
             if not result:
-                raise FinanceAPIException(f"未找到股票代码 {ticker} 的财务数据")
+                raise FinanceAPIException(
+                    message=f"未找到股票代码 {ticker} 的财务数据",
+                    code="DATA_NOT_FOUND"
+                )
 
             # 缓存结果
             if use_cache:
@@ -116,7 +135,10 @@ class SecService:
                 raise
 
             logger.error(f"获取财务数据失败: {ticker}, 错误: {e}")
-            raise FinanceAPIException(f"获取财务数据失败: {str(e)}")
+            raise FinanceAPIException(
+                message=f"获取财务数据失败: {str(e)}",
+                code="FINANCIALS_ERROR"
+            )
 
     async def get_quarterly_revenue(
         self,
@@ -136,7 +158,10 @@ class SecService:
             季度收入数据字典
         """
         if not (1 <= quarters <= 20):
-            raise FinanceAPIException("季度数必须在1-20之间")
+            raise FinanceAPIException(
+                message="季度数必须在1-20之间",
+                code="INVALID_QUARTERS"
+            )
 
         # 获取财务数据
         financials = await self.get_company_financials(
@@ -204,7 +229,10 @@ class SecService:
             SEC新闻数据字典
         """
         if not (1 <= limit <= 100):
-            raise FinanceAPIException("新闻数量限制必须在1-100之间")
+            raise FinanceAPIException(
+                message="新闻数量限制必须在1-100之间",
+                code="INVALID_LIMIT"
+            )
 
         ticker = ticker.upper().strip()
         cache_key = f"sec:news:{ticker}:{limit}"
@@ -254,7 +282,10 @@ class SecService:
                 raise
 
             logger.error(f"获取SEC新闻失败: {ticker}, 错误: {e}")
-            raise FinanceAPIException(f"获取SEC新闻失败: {str(e)}")
+            raise FinanceAPIException(
+                message=f"获取SEC新闻失败: {str(e)}",
+                code="NEWS_ERROR"
+            )
 
     async def get_financial_ratios(
         self,
@@ -274,7 +305,10 @@ class SecService:
             财务比率数据字典
         """
         if period not in ["annual", "quarterly"]:
-            raise FinanceAPIException("期间类型必须是 'annual' 或 'quarterly'")
+            raise FinanceAPIException(
+                message="期间类型必须是 'annual' 或 'quarterly'",
+                code="INVALID_PERIOD"
+            )
 
         ticker = ticker.upper().strip()
         cache_key = f"sec:ratios:{ticker}:{period}"
@@ -304,7 +338,10 @@ class SecService:
             elif period == "quarterly" and financials.get('quarterly_financials'):
                 latest = financials['quarterly_financials'][0]
             else:
-                raise FinanceAPIException(f"未找到 {period} 财务数据")
+                raise FinanceAPIException(
+                    message=f"未找到 {period} 财务数据",
+                    code="DATA_NOT_FOUND"
+                )
 
             # 计算比率
             ratios = {}
@@ -337,7 +374,7 @@ class SecService:
                 'period': period_info,
                 'ratios': ratios,
                 'calculation_date': datetime.now().isoformat(),
-                'data_source': '模拟数据' if self.data_source._mock_mode else 'SEC EDGAR'
+                'data_source': 'SEC EDGAR'
             }
 
             # 缓存结果
@@ -359,7 +396,10 @@ class SecService:
                 raise
 
             logger.error(f"计算财务比率失败: {ticker}, 错误: {e}")
-            raise FinanceAPIException(f"计算财务比率失败: {str(e)}")
+            raise FinanceAPIException(
+                message=f"计算财务比率失败: {str(e)}",
+                code="RATIOS_ERROR"
+            )
 
     async def get_annual_comparison(
         self,
@@ -379,7 +419,10 @@ class SecService:
             年度对比数据字典
         """
         if not (2 <= years <= 10):
-            raise FinanceAPIException("对比年数必须在2-10之间")
+            raise FinanceAPIException(
+                message="对比年数必须在2-10之间",
+                code="INVALID_YEARS"
+            )
 
         # 获取财务数据
         financials = await self.get_company_financials(
@@ -391,7 +434,10 @@ class SecService:
 
         annual_data = financials.get('annual_financials', [])
         if len(annual_data) < 2:
-            raise FinanceAPIException(f"需要至少2年的数据进行对比，当前只有{len(annual_data)}年")
+            raise FinanceAPIException(
+                message=f"需要至少2年的数据进行对比，当前只有{len(annual_data)}年",
+                code="INSUFFICIENT_DATA"
+            )
 
         # 构建对比数据
         comparison_data = []
@@ -476,16 +522,33 @@ def get_sec_service() -> SecService:
     """获取SEC服务实例（单例模式）"""
     global _sec_service
     if _sec_service is None:
-        # 使用配置中的API key
-        _sec_service = SecService(api_key=settings.sec_api_key)
+        # 检查是否有API密钥
+        if not settings.sec_api_key:
+            raise FinanceAPIException(
+                message="SEC服务需要有效的API密钥。请设置环境变量 SEC_API_KEY 或在配置中提供密钥。获取API密钥请访问: https://sec-api.io/",
+                code="SEC_API_KEY_MISSING"
+            )
+        try:
+            _sec_service = SecService(api_key=settings.sec_api_key)
+        except Exception as e:
+            logger.error(f"SEC服务初始化失败: {e}")
+            raise FinanceAPIException(
+                message=f"SEC服务不可用: {str(e)}",
+                code="SEC_SERVICE_UNAVAILABLE"
+            )
     return _sec_service
 
 
 async def initialize_sec_service(api_key: Optional[str] = None):
     """初始化SEC服务"""
     global _sec_service
-    _sec_service = SecService(api_key=api_key)
-    logger.info("SEC服务已初始化")
+    try:
+        _sec_service = SecService(api_key=api_key)
+        logger.info("SEC服务已初始化")
+    except Exception as e:
+        logger.error(f"SEC服务初始化失败: {e}")
+        # 不抛出异常，允许应用继续启动，但服务不可用
+        _sec_service = None
 
 
 async def shutdown_sec_service():

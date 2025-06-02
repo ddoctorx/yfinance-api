@@ -108,11 +108,27 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
+**方式一：使用配置向导（推荐）**
+
+```bash
+# 运行交互式配置向导
+./setup_env.sh
+```
+
+配置向导会帮助你：
+
+- 从 `config.env` 模板创建 `.env` 文件
+- 交互式设置 API 密钥（Polygon.io、SEC API）
+- 选择开发或生产环境配置
+- 自动备份现有配置文件
+
+**方式二：手动配置**
+
 ```bash
 # 复制配置模板
 cp config.env .env
 
-# 编辑配置文件（可选）
+# 编辑配置文件
 vim .env
 ```
 
@@ -125,23 +141,25 @@ LOG_LEVEL=INFO
 HOST=127.0.0.1
 PORT=8000
 
-# Yahoo Finance配置
+# Yahoo Finance配置（主数据源，无需API密钥）
 YF_TIMEOUT=30
 YF_MAX_RETRIES=3
 
-# Polygon.io配置（可选，用于数据源降级）
-POLYGON_API_KEY=your_polygon_api_key_here
+# Polygon.io配置（降级数据源，可选）
+POLYGON_API_KEY=your_polygon_api_key_here  # 从 https://polygon.io/dashboard/api-keys 获取
 
 # 降级机制配置
 FALLBACK_ENABLED=true
-MAX_CONSECUTIVE_FAILURES=3
+PRIMARY_SOURCE_MAX_FAILURES=5
+FALLBACK_TIMEOUT=10
+FALLBACK_COOLDOWN_PERIOD=300
 
 # 缓存配置
 REDIS_URL=redis://localhost:6379/0  # 可选，不配置则使用内存缓存
 CACHE_TTL=300
 
-# SEC API配置（财报数据功能）
-SEC_API_KEY=your_sec_api_key_here  # SEC财报数据API密钥
+# SEC API配置（财报数据功能，可选）
+SEC_API_KEY=your_sec_api_key_here  # 从 https://sec-api.io/dashboard 获取
 SEC_API_TIMEOUT=30
 SEC_API_MAX_RETRIES=3
 
@@ -152,14 +170,30 @@ RATE_LIMIT_WINDOW=60
 
 ### 3. 启动服务
 
-**方式一：使用启动脚本（推荐）**
+**方式一：使用主启动脚本（推荐）**
 
 ```bash
-chmod +x start_with_sec_api.sh
-./start_with_sec_api.sh
+chmod +x start_api.sh
+./start_api.sh
 ```
 
-**方式二：直接启动**
+这个脚本会：
+
+- ✅ 检查环境配置和 API 密钥
+- ✅ 显示所有功能模块状态
+- ✅ 启动完整的 Finance API 服务
+- ✅ 提供详细的访问地址和使用提示
+
+**方式二：快速启动（开发用）**
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+适合已配置好环境的日常开发使用。
+
+**方式三：直接启动**
 
 ```bash
 # 开发模式
@@ -169,12 +203,15 @@ uvicorn app.main:app --reload --port 8000
 gunicorn -k uvicorn.workers.UvicornWorker app.main:app -c gunicorn_conf.py
 ```
 
-**方式三：带环境变量启动**
+**方式四：带环境变量启动**
 
 ```bash
 export SEC_API_KEY="your_sec_api_key_here"
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+**⚠️ 兼容性说明**
+**注意**: 旧版的 `start_with_sec_api.sh` 已被移除，请使用新的 `start_api.sh`。
 
 ## 📖 API 文档
 
@@ -296,21 +333,24 @@ curl "http://localhost:8000/api/v1/test/data-sources/status"
 
 ```json
 {
+  "success": true,
+  "code": "SUCCESS",
+  "message": "获取股票报价成功",
   "symbol": "AAPL",
   "data": {
-    "symbol": "AAPL",
-    "current_price": 175.5,
-    "change": 2.5,
-    "change_percent": 1.45,
-    "volume": 45678900,
-    "market_cap": 2800000000000,
-    "currency": "USD",
-    "last_updated": "2025-06-02T10:30:00Z"
+    "last_price": 200.85000610351562,
+    "previous_close": 200.29,
+    "open_price": 199.3699951171875,
+    "day_high": 201.9600067138672,
+    "day_low": 196.77999877929688,
+    "volume": 70753100,
+    "market_cap": 2999855482597,
+    "shares": 14935799808,
+    "currency": "USD"
   },
+  "timestamp": "2025-06-02T19:52:49.696131",
   "data_source": "yahoo_finance",
-  "is_fallback": false,
-  "success": true,
-  "timestamp": "2025-06-02T10:30:05Z"
+  "is_fallback": false
 }
 ```
 
@@ -318,26 +358,45 @@ curl "http://localhost:8000/api/v1/test/data-sources/status"
 
 ```json
 {
-  "ticker": "AAPL",
-  "summary": {
-    "total_annual_reports": 2,
-    "total_quarterly_reports": 16,
-    "latest_annual_date": "2018-09-29",
-    "latest_quarterly_date": "2019-03-31"
+  "success": true,
+  "code": "SUCCESS",
+  "message": "获取财务数据成功",
+  "symbol": "AAPL",
+  "data": {
+    "ticker": "AAPL",
+    "summary": {
+      "total_annual_reports": 2,
+      "total_quarterly_reports": 16,
+      "latest_annual_date": "2018-09-29",
+      "latest_quarterly_date": "2019-03-31"
+    },
+    "annual_financials": [
+      {
+        "fiscal_year": 2018,
+        "period_end": "2018-09-29",
+        "revenue": 215639000000,
+        "net_income": 43142000000,
+        "total_assets": 365725000000,
+        "shareholders_equity": 107147000000
+      }
+    ]
   },
-  "annual_financials": [
-    {
-      "fiscal_year": 2018,
-      "period_end": "2018-09-29",
-      "revenue": 215639000000,
-      "net_income": 43142000000,
-      "total_assets": 365725000000,
-      "shareholders_equity": 107147000000
-    }
-  ],
+  "timestamp": "2025-06-02T19:52:49.696131",
   "data_source": "sec_edgar",
-  "cache_used": true,
-  "last_updated": "2025-06-02T10:30:00Z"
+  "is_fallback": false
+}
+```
+
+### 错误响应示例
+
+```json
+{
+  "success": false,
+  "code": "TICKER_NOT_FOUND",
+  "message": "未找到股票代码: INVALID",
+  "detail": "无法获取 INVALID 的数据",
+  "timestamp": "2025-06-02T19:53:00.941177",
+  "details": {}
 }
 ```
 
@@ -347,18 +406,55 @@ curl "http://localhost:8000/api/v1/test/data-sources/status"
 
 ```json
 {
+  "success": true,
+  "code": "SUCCESS",
+  "message": "获取股票报价成功 (使用降级数据源: polygon)",
   "symbol": "AAPL",
   "data": {
-    "current_price": 175.5,
-    "change": 2.5,
-    "volume": 45678900
+    "last_price": 200.85,
+    "previous_close": 200.29,
+    "volume": 70753100
   },
+  "timestamp": "2025-06-02T19:52:49.696131",
   "data_source": "polygon",
-  "is_fallback": true,
-  "success": true,
-  "timestamp": "2025-06-02T10:30:05Z"
+  "is_fallback": true
 }
 ```
+
+### 批量响应示例
+
+```json
+{
+  "success": true,
+  "code": "PARTIAL_SUCCESS",
+  "message": "批量获取报价部分成功，成功2个，失败1个",
+  "data": {
+    "AAPL": {
+      "last_price": 200.85
+      // ...AAPL数据
+    },
+    "MSFT": {
+      "last_price": 460.36
+      // ...MSFT数据
+    }
+  },
+  "errors": {
+    "INVALID": "获取报价失败"
+  },
+  "timestamp": "2025-06-02T19:53:07.626682"
+}
+```
+
+## 📋 响应格式标准
+
+所有 API 响应都包含以下标准字段：
+
+- **`success`** (boolean): 请求是否成功
+- **`code`** (string): 响应状态码 (`SUCCESS`, `PARTIAL_SUCCESS`, `TICKER_NOT_FOUND` 等)
+- **`message`** (string): 人类可读的响应消息
+- **`timestamp`** (string): 响应时间戳 (ISO 8601 格式)
+
+详细的响应格式文档请参见: [API 响应格式标准](docs/api_response_format.md)
 
 ## 🔄 智能降级机制详解
 
@@ -393,15 +489,15 @@ curl "http://localhost:8000/api/v1/test/data-sources/status"
 
 ```bash
 # 方式一：环境变量
-export SEC_API_KEY="your_real_api_key"
+export SEC_API_KEY="your_real_api_key_here"
 export POLYGON_API_KEY="your_polygon_key"
 
 # 方式二：.env文件
-echo "SEC_API_KEY=your_real_api_key" >> .env
+echo "SEC_API_KEY=your_real_api_key_here" >> .env
 echo "POLYGON_API_KEY=your_polygon_key" >> .env
 
 # 方式三：启动脚本
-./start_with_sec_api.sh  # 内置API key配置
+./start_with_sec_api.sh  # 需要修改脚本中的API密钥
 ```
 
 ### 安全特性
@@ -497,3 +593,54 @@ export SEC_API_KEY="production_api_key"
 **🎉 快速开始**: `./start_with_sec_api.sh` → 访问 http://localhost:8000/docs
 
 **⭐ 如果这个项目对您有帮助，请给个 Star！**
+
+## 🔧 SEC 服务配置
+
+### ⚠️ 重要说明
+
+SEC 财报数据功能需要**有效的 SEC API 密钥**才能正常工作。这是一个**生产级别的金融 API**，不提供模拟数据：
+
+- ✅ **有 API 密钥时**: 提供真实的 SEC EDGAR 财务报表数据
+- ❌ **无 API 密钥时**: 服务不可用，返回明确的错误信息
+
+**获取 API 密钥**: https://sec-api.io/
+
+### 🔑 配置方式
+
+```bash
+# 方式一：环境变量
+export SEC_API_KEY="your_real_api_key_here"
+
+# 方式二：.env文件
+echo "SEC_API_KEY=your_real_api_key_here" >> .env
+
+# 方式三：启动脚本
+./start_with_sec_api.sh  # 需要修改脚本中的API密钥
+```
+
+### 📱 可用的 SEC API 端点
+
+**仅在配置有效 API 密钥时可用**：
+
+```bash
+GET /api/v1/sec/financials/{ticker}        # 财务报表
+GET /api/v1/sec/quarterly-revenue/{ticker} # 季度收入
+GET /api/v1/sec/annual-comparison/{ticker} # 年度对比
+GET /api/v1/sec/news/{ticker}             # SEC新闻
+GET /api/v1/sec/ratios/{ticker}           # 财务比率
+GET /api/v1/sec/health                    # 健康检查
+```
+
+### 🚫 错误响应示例
+
+当 SEC 服务不可用时，会返回 HTTP 503 错误：
+
+```json
+{
+  "detail": {
+    "error": "SEC服务不可用",
+    "message": "SEC API需要有效的API密钥。请设置环境变量 SEC_API_KEY 或在配置中提供密钥。获取API密钥请访问: https://sec-api.io/",
+    "solution": "请检查SEC API密钥配置或联系管理员"
+  }
+}
+```

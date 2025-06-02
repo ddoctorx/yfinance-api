@@ -45,18 +45,22 @@ async def get_quote(
     symbol = symbol.upper().strip()
     quote_data = await manager.get_fast_quote(symbol)
 
-    # 在响应中添加数据源信息
-    response = BaseResponse(
+    # 确定数据源和降级状态
+    data_source = getattr(quote_data, 'data_source', None)
+    is_fallback = getattr(quote_data, 'is_fallback', False)
+
+    # 构建响应消息
+    message = "获取股票报价成功"
+    if is_fallback:
+        message += f" (使用降级数据源: {data_source})"
+
+    return BaseResponse.success_response(
+        data=quote_data,
         symbol=symbol,
-        data=quote_data
+        message=message,
+        data_source=data_source,
+        is_fallback=is_fallback
     )
-
-    # 如果数据中包含数据源信息，添加到响应中
-    if hasattr(quote_data, '__dict__') and 'data_source' in quote_data.__dict__:
-        response.data_source = quote_data.data_source
-        response.is_fallback = getattr(quote_data, 'is_fallback', False)
-
-    return response
 
 
 @router.get("/{symbol}/detailed", response_model=BaseResponse[QuoteData])
@@ -80,17 +84,22 @@ async def get_detailed_quote(
     symbol = symbol.upper().strip()
     quote_data = await manager.get_detailed_quote(symbol)
 
-    response = BaseResponse(
+    # 确定数据源和降级状态
+    data_source = getattr(quote_data, 'data_source', None)
+    is_fallback = getattr(quote_data, 'is_fallback', False)
+
+    # 构建响应消息
+    message = "获取详细股票报价成功"
+    if is_fallback:
+        message += f" (使用降级数据源: {data_source})"
+
+    return BaseResponse.success_response(
+        data=quote_data,
         symbol=symbol,
-        data=quote_data
+        message=message,
+        data_source=data_source,
+        is_fallback=is_fallback
     )
-
-    # 添加数据源信息
-    if hasattr(quote_data, '__dict__') and 'data_source' in quote_data.__dict__:
-        response.data_source = quote_data.data_source
-        response.is_fallback = getattr(quote_data, 'is_fallback', False)
-
-    return response
 
 
 @router.get("/{symbol}/info", response_model=BaseResponse[CompanyInfo])
@@ -114,17 +123,22 @@ async def get_company_info(
     symbol = symbol.upper().strip()
     company_info = await manager.get_company_info(symbol)
 
-    response = BaseResponse(
+    # 确定数据源和降级状态
+    data_source = getattr(company_info, 'data_source', None)
+    is_fallback = getattr(company_info, 'is_fallback', False)
+
+    # 构建响应消息
+    message = "获取公司信息成功"
+    if is_fallback:
+        message += f" (使用降级数据源: {data_source})"
+
+    return BaseResponse.success_response(
+        data=company_info,
         symbol=symbol,
-        data=company_info
+        message=message,
+        data_source=data_source,
+        is_fallback=is_fallback
     )
-
-    # 添加数据源信息
-    if hasattr(company_info, '__dict__') and 'data_source' in company_info.__dict__:
-        response.data_source = company_info.data_source
-        response.is_fallback = getattr(company_info, 'is_fallback', False)
-
-    return response
 
 
 @router.post("/batch", response_model=BatchResponse[FastQuoteData])
@@ -161,7 +175,28 @@ async def get_batch_quotes(
         if symbol not in quotes:
             errors[symbol] = "获取报价失败"
 
+    # 构建响应消息
+    success_count = len(quotes)
+    error_count = len(errors)
+    total_count = len(valid_symbols)
+
+    if error_count == 0:
+        message = f"批量获取报价成功，共{total_count}个股票"
+        code = "SUCCESS"
+        success = True
+    elif success_count == 0:
+        message = f"批量获取报价失败，{total_count}个股票都失败"
+        code = "PARTIAL_FAILURE"
+        success = False
+    else:
+        message = f"批量获取报价部分成功，成功{success_count}个，失败{error_count}个"
+        code = "PARTIAL_SUCCESS"
+        success = True
+
     return BatchResponse(
+        success=success,
+        code=code,
+        message=message,
         data=quotes,
         errors=errors
     )
@@ -202,7 +237,28 @@ async def get_quotes_by_symbols(
         if symbol not in quotes:
             errors[symbol] = "获取报价失败"
 
+    # 构建响应消息
+    success_count = len(quotes)
+    error_count = len(errors)
+    total_count = len(symbol_list)
+
+    if error_count == 0:
+        message = f"批量获取报价成功，共{total_count}个股票"
+        code = "SUCCESS"
+        success = True
+    elif success_count == 0:
+        message = f"批量获取报价失败，{total_count}个股票都失败"
+        code = "PARTIAL_FAILURE"
+        success = False
+    else:
+        message = f"批量获取报价部分成功，成功{success_count}个，失败{error_count}个"
+        code = "PARTIAL_SUCCESS"
+        success = True
+
     return BatchResponse(
+        success=success,
+        code=code,
+        message=message,
         data=quotes,
         errors=errors
     )
